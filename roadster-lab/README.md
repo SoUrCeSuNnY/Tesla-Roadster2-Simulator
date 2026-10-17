@@ -11,9 +11,36 @@ cd roadster-lab
 python3 -m http.server 8080 --directory dist
 ```
 
-打开 <http://localhost:8080/> 进入模拟器。浏览器需要支持 JavaScript、ES modules 和 WebGL；请通过 HTTP 访问，不要直接双击 HTML 使用 `file://`。静态服务器无需额外 Python 包。
+打开 <http://localhost:8080/> 进入模块化模拟器。此入口需要支持 JavaScript、ES modules 和 WebGL2；`dist/index.html` 请通过 HTTP 访问。**单文件离线版则支持直接双击，见下文。** 静态服务器无需额外 Python 包。
 
 原结构／资产查看器保留在 <http://localhost:8080/viewer.html>，不与模拟器共用控制键。
+
+## 单 HTML 离线分发版
+
+从 `roadster-lab/` 执行（只需 Node.js，无需 `npm install`）：
+
+```bash
+npm run build
+# 等价命令：npm run build:single
+# 也可从任意目录运行：node /项目绝对路径/roadster-lab/scripts/build-single-html.mjs
+```
+
+生成 **`dist/roadster-rocket-standalone.html`**（当前约1.46 MB，已随代码提供）。只复制这一个文件即可离线分发，直接双击以 `file://` 打开；无需 HTTP 服务器或同目录资源。CSS、Three.js r170、模型及14个运行模块已内联为一个经典自执行脚本，内含 Three.js MIT 许可，无外部请求、模块加载或 CDN。
+
+- 功能包含城市模拟器、音效、HUD、自定义按键、三轴反转和起飞／落地辅助；**原资产查看器及图片库不包含在此分发文件内**。
+- 仍需当前浏览器支持 WebGL2／硬件加速；音频需首次用户交互。部分浏览器对 `file://` 的 `localStorage` 限制不同，禁用存储时自动退回当前会话内配置，不影响驾驶。
+- 修改模块源码或样式后请重新构建；相同输入生成字节相同的产物。不要直接编辑生成的 HTML。
+- 构建器只支持本项目实际使用的静态 named／namespace imports、const／function／class 与导出列表；不是通用 ESM 打包器，遇动态 import、循环依赖、默认导入／导出、外部资源等会报错停止。
+
+验证命令：
+
+```bash
+npm run test:single                         # 17项构建／语法／确定性／拒绝路径测试
+node --test scripts/test-simulator.mjs     # 原112项物理与输入测试
+python3 scripts/test-standalone.py         # 可选 Playwright + Chromium，真实file://离线测试
+```
+
+浏览器验证脚本将**仅单个HTML**复制到含空格和Unicode的临时目录，启用离线环境并阻止HTTP请求；检查渲染、驾驶／喷口、改键、反转、起飞保护、LANDING与音频初始化。测试工具是可选开发依赖，分发文件运行无需 Python、Node或Playwright。
 
 ## 键盘操作
 
@@ -102,6 +129,9 @@ python3 -m http.server 8080 --directory dist
 | `dist/vendor/` | 本地 Three.js、OrbitControls、GLTFExporter 与许可 |
 | `scripts/test-simulator.mjs` | 模拟器数值与行为测试 |
 | `scripts/test-browser.py` | 可选 Playwright／Chromium 交互回归 |
+| `scripts/build-single-html.mjs` | 零依赖单文件打包器 |
+| `scripts/test-single-html.mjs`, `scripts/test-standalone.py` | 构建与真实file://离线验证 |
+| `dist/roadster-rocket-standalone.html` | 生成的独立分发文件 |
 | `docs/SIMULATOR-VERIFICATION.md` | 模拟器验证结果、复现步骤与覆盖边界 |
 | `docs/EVIDENCE.md` | 原模型图片来源、内构边界与喷口推断依据 |
 

@@ -7,6 +7,14 @@
 - `npm run check`：**PASS**。6746 三角形、283 网格、10 喷口、6 张资料图片；GLB 522356 bytes、270 导出节点。
 - `python3 scripts/test-browser.py`：真实无头 Chromium **66 项检查通过**；模拟器与查看器均无 JavaScript `pageerror`。使用软件 WebGL 参数 `--enable-unsafe-swiftshader`，不是特定 GPU 的性能验证。
 
+## 单文件分发构建验证
+
+- `npm run build`：**PASS**；14模块，`dist/roadster-rocket-standalone.html` **1,461,810 bytes**。Three.js、MIT许可、CSS与模拟器内联，无外部模块加载。
+- `node --test scripts/test-single-html.mjs scripts/test-simulator.mjs`：**129/129 passed**（17项构建＋原112项）。验证确定性、脚本编译、完整模块／CSS／许可、路径独立执行、非法模块语法／循环／越界引用拒绝，以及HTML／模块／CSS／许可直写与符号链接覆写保护。
+- `python3 scripts/test-standalone.py`：真实Chromium **16/16 passed**。只复制生成HTML到含空格／Unicode的隔离临时目录，使用 `file://` 与离线浏览器上下文；**HTTP请求0、其他资源请求0、请求失败0、pageerror0**。覆盖WebGL渲染、驾驶、喷流耗气、重置、改键、轴反转、实际起飞保护、LANDING和音频解锁。Reviewer独立运行同一16项检查通过。
+- Reviewer首轮发现输出路径可能覆写Three许可或通过符号链接覆写输入，已改为canonical realpath比较并补测试；针对性复审 **Approve for commit**，17项构建回归独立通过。
+- 构建器为本项目约束语法设计，不是通用ESM转换器；不保证hard-link别名／恶意并发文件系统修改防护。离线浏览器配置持久化受各浏览器file-origin政策影响，已有异常回退。跨浏览器／真实GPU仍未验收。
+
 ## 最终复审
 
 **APPROVED**：本轮 LANDING／起飞保护／三轴反转已完成最终复审。Reviewer 首轮发现焦点清键可绕过物理松键保护，现使用独立 physicalKeys 跟踪并阻止清键后的 auto-repeat 复活；复审无剩余阻塞项。Reviewer 独立重跑 **112/112** 单测通过。集成方完整 Chromium **66 项检查全部通过**（含真实 W/I/K 起飞、动态警告、焦点repeat防绕过、LANDING实际帧、三轴反转持久化和移动视口）。
@@ -49,5 +57,5 @@ python3 scripts/test-browser.py
 - 本轮扩展浏览器脚本在软件渲染下曾超过170秒；测试场景现将WebGL像素比降为0.5、保留原CSS视口，最终在240秒工具上限内完整通过66项。此优化仅在测试脚本内，不改变游戏默认渲染。浏览器／操作系统保留快捷键不保证可捕获。
 - 起飞物理键的keyup若在浏览器失焦期间丢失，会保守保留锁定；重新按下并松开提示键恢复。这是fail-closed设计，不会因焦点清键误解锁。
 - 接地数值与控制回归验证的是本游戏实现，不代表真实车辆性能或物理参数校准。
-- 当前工作目录不含 Git 仓库元数据，不能提供 Git diff／提交级验证。
+- 前轮开发时未提供Git元数据；本次单文件目标任务开始时仓库已初始化，按明确路径审查／暂存并遵循Conventional Commits与指定Co-Authored署名提交。
 - 之前超时的补充测试子任务已取消，本记录采用新加入并实际运行的回归脚本结果，不依赖该子任务。
