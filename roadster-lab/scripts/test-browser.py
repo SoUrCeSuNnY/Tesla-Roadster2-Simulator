@@ -20,14 +20,15 @@ with sync_playwright() as playwright:
     browser = playwright.chromium.launch(
         headless=True, args=['--no-sandbox', '--enable-unsafe-swiftshader'])
     page = browser.new_page(viewport={'width': 1440, 'height': 1000})
-    page.set_default_timeout(10000)
+    page.set_default_timeout(15000)
     page.on('pageerror', lambda error: errors.append(str(error)))
     print(f'Opening simulator: {URL}', flush=True)
     page.goto(URL)
     page.wait_for_function('!!window.rocketLab && window.rocketLab.frame > 2')
     # Keep software-WebGL regression affordable; retain CSS viewport dimensions.
     page.evaluate('''() => { rocketLab.scene.onBeforeRender = renderer => {
-      if(renderer.getPixelRatio() !== .5) renderer.setPixelRatio(.5);
+      if(renderer.getPixelRatio() !== .25) renderer.setPixelRatio(.25);
+      renderer.shadowMap.enabled=false;
     }; }''')
 
     def check(name, expression):
@@ -39,8 +40,18 @@ with sync_playwright() as playwright:
         page.wait_for_function('''!document.querySelector('#sim-keybind-dialog').open &&
             document.activeElement.id === 'viewport' ''')
 
+    def click(selector):
+        point=page.evaluate('''selector => {
+          const node=document.querySelector(selector);if(!node||node.disabled)throw new Error('Unavailable '+selector);
+          node.scrollIntoView({block:'nearest'});
+          const r=node.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+          if(!node.contains(document.elementFromPoint(x,y)))throw new Error('Obscured '+selector);
+          return {x,y};
+        }''',selector)
+        page.mouse.click(point['x'],point['y'])
+
     def rebind(action, key):
-        page.locator(f'button[data-bind="{action}"]').click()
+        click(f'button[data-bind="{action}"]')
         page.keyboard.press(key)
 
     def takeoff_with_key(key, label):
@@ -152,7 +163,7 @@ with sync_playwright() as playwright:
 
     page.keyboard.down('w')
     check('held driving key before keybinds', 'rocketLab.input().forward')
-    page.locator('#sim-keybinds').click()
+    click('#sim-keybinds')
     page.wait_for_function("document.querySelector('#sim-keybind-dialog').open")
     check('keybind entry opens modal with all 12 actions', '''
         document.querySelector('#sim-keybind-dialog').matches(':modal') &&
@@ -213,7 +224,7 @@ with sync_playwright() as playwright:
         document.querySelector('button[data-bind="forward"]').textContent === 'I' &&
         document.querySelector('[data-key-action="forward"]').textContent === 'I';
     }''')
-    page.locator('#sim-keybind-done').click()
+    click('#sim-keybind-done')
     wait_for_driving_focus()
     check('Done restores viewport focus without stuck controls', '''
         rocketLab.keys.size === 0 && !Object.values(rocketLab.input()).some(Boolean)''')
@@ -224,7 +235,7 @@ with sync_playwright() as playwright:
     check('new I drives ground throttle', 'rocketLab.input().forward')
     page.keyboard.up('i')
 
-    page.locator('#sim-keybinds').click()
+    click('#sim-keybinds')
     rebind('pitchDown', 'k')
     rebind('reset', 't')
     check('flight and reset actions bind independently via UI', '''
@@ -234,7 +245,7 @@ with sync_playwright() as playwright:
         document.querySelector('[data-key-action="pitchDown"]').textContent === 'K' &&
         [...document.querySelectorAll('[data-key-action="reset"]')].every(n => n.textContent === 'T')''')
     saved_bindings = page.evaluate('rocketLab.keybinds.bindings')
-    page.locator('button[data-bind="forward"]').click()
+    click('button[data-bind="forward"]')
     page.keyboard.press('Escape')
     check('Escape cancels capture without closing or changing bindings', f'''() => {{
       const expected = {json.dumps(saved_bindings)};
@@ -285,7 +296,8 @@ with sync_playwright() as playwright:
     page.wait_for_function('!!window.rocketLab && window.rocketLab.frame > 2')
     # Keep software-WebGL regression affordable; retain CSS viewport dimensions.
     page.evaluate('''() => { rocketLab.scene.onBeforeRender = renderer => {
-      if(renderer.getPixelRatio() !== .5) renderer.setPixelRatio(.5);
+      if(renderer.getPixelRatio() !== .25) renderer.setPixelRatio(.25);
+      renderer.shadowMap.enabled=false;
     }; }''')
     check('custom bindings and HUD survive reload', '''
         rocketLab.keybinds.bindings.forward === 'KeyI' &&
@@ -297,7 +309,7 @@ with sync_playwright() as playwright:
     page.keyboard.down('i')
     check('persisted I still drives after reload', 'rocketLab.input().forward')
     page.keyboard.up('i')
-    page.locator('#sim-keybinds').click()
+    click('#sim-keybinds')
     check('reopened panel displays persisted bindings', '''
         document.querySelector('[data-bind="forward"]').textContent === 'I' &&
         document.querySelector('[data-bind="pitchDown"]').textContent === 'K' &&
@@ -313,7 +325,7 @@ with sync_playwright() as playwright:
       return ['pitch','yaw','roll'].every(axis => rocketLab.keybinds.inversions[axis] &&
         saved.inversions[axis] && document.querySelector(`#sim-invert-${axis}`).checked);
     }''')
-    page.locator('#sim-keybind-done').click()
+    click('#sim-keybind-done')
     wait_for_driving_focus()
 
     takeoff_with_key('i', 'I')
@@ -341,14 +353,15 @@ with sync_playwright() as playwright:
     page.wait_for_function('!!window.rocketLab && window.rocketLab.frame > 2')
     # Keep software-WebGL regression affordable; retain CSS viewport dimensions.
     page.evaluate('''() => { rocketLab.scene.onBeforeRender = renderer => {
-      if(renderer.getPixelRatio() !== .5) renderer.setPixelRatio(.5);
+      if(renderer.getPixelRatio() !== .25) renderer.setPixelRatio(.25);
+      renderer.shadowMap.enabled=false;
     }; }''')
-    page.locator('#sim-keybinds').click()
+    click('#sim-keybinds')
     check('all inversions and custom bindings persist through reload', '''
         ['pitch','yaw','roll'].every(axis => rocketLab.keybinds.inversions[axis] &&
           document.querySelector(`#sim-invert-${axis}`).checked) &&
         rocketLab.keybinds.bindings.forward === 'KeyI' && rocketLab.keybinds.bindings.pitchDown === 'KeyK' ''')
-    page.locator('#sim-keybind-done').click()
+    click('#sim-keybind-done')
     wait_for_driving_focus()
     page.keyboard.down('i')
     page.keyboard.down('a')
@@ -367,7 +380,7 @@ with sync_playwright() as playwright:
     }''')
     for key, axis, index, sign, enabled, disabled in [
         ('k', 'pitch', 2, 1, 'back', 'forward'),
-        ('a', 'yaw', 1, 1, 'right', 'left'),
+        ('a', 'yaw', 1, -1, 'right', 'left'),
         ('q', 'roll', 0, 1, 'rollRight', 'rollLeft'),
     ]:
         page.keyboard.down(key)
@@ -381,10 +394,10 @@ with sync_playwright() as playwright:
         }}''')
         page.keyboard.up(key)
     page.evaluate('rocketLab.reset()')
-    page.locator('#sim-keybinds').click()
+    click('#sim-keybinds')
     keybind_screenshot = screenshot.with_name('simulator-keybinds.png')
     page.screenshot(path=str(keybind_screenshot), full_page=True)
-    page.locator('#sim-keybind-defaults').click()
+    click('#sim-keybind-defaults')
     check('defaults restore every action, HUD label and stored binding', f'''() => {{
       const expected = {json.dumps(default_bindings)};
       const saved = JSON.parse(localStorage.getItem('roadster.keybinds.v1'));
@@ -399,7 +412,7 @@ with sync_playwright() as playwright:
       return ['pitch','yaw','roll'].every(axis => rocketLab.keybinds.inversions[axis] === false &&
         saved.inversions[axis] === false && !document.querySelector(`#sim-invert-${axis}`).checked);
     }''')
-    page.locator('#sim-keybind-done').click()
+    click('#sim-keybind-done')
     wait_for_driving_focus()
     page.keyboard.down('w')
     check('default W drives again', 'rocketLab.input().forward')
@@ -416,7 +429,7 @@ with sync_playwright() as playwright:
             r.top >= 0 && r.bottom <= innerHeight &&
             button.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2));
         }''')
-        page.locator('#sim-keybinds').click(timeout=10000)
+        click('#sim-keybinds')
         page.wait_for_function("document.querySelector('#sim-keybind-dialog').open")
         check(f'{width}x{height} modal fits without horizontal overflow', '''() => {
           const dialog = document.querySelector('#sim-keybind-dialog'), r = dialog.getBoundingClientRect();
@@ -431,7 +444,7 @@ with sync_playwright() as playwright:
             r.top >= 0 && r.bottom <= innerHeight &&
             button.contains(document.elementFromPoint(r.x + r.width/2, r.y + r.height/2));
         }}''')
-        page.locator(close).click(timeout=10000)
+        click(close)
         wait_for_driving_focus()
     page.set_viewport_size({'width': 1440, 'height': 1000})
 
@@ -461,7 +474,7 @@ with sync_playwright() as playwright:
 
     page.goto(URL.rstrip('/') + '/viewer.html')
     page.wait_for_function("document.querySelectorAll('#nozzle-list [data-nozzle]').length === 10")
-    page.locator('[data-mode="xray"]').click()
+    click('[data-mode="xray"]')
     check('real-browser viewer entry and mode switch', "document.querySelector('#view-label').textContent === '02 / INSIDE'")
     assert not errors, errors
     checks.append('no JavaScript page errors on simulator or viewer')

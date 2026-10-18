@@ -1,4 +1,4 @@
-# Roadster Rocket Lab — 驾驶与冷气推进实验
+# Roadster Rocket Lab v0.1 — 驾驶与冷气推进实验
 
 基于 Three.js 的浏览器实验游戏：在地面驾驶低多边形 Roadster，使用冷气推进器起飞、调整姿态并尝试着陆。车辆外观来自公开图像的独立艺术重构；物理参数是游戏实验假设，**不是 Tesla 官方数据、工程复原或真实车辆的设计／安全参考**。
 
@@ -25,7 +25,7 @@ npm run build
 # 也可从任意目录运行：node /项目绝对路径/roadster-lab/scripts/build-single-html.mjs
 ```
 
-生成 **`dist/roadster-rocket-standalone.html`**（当前约1.46 MB，已随代码提供）。只复制这一个文件即可离线分发，直接双击以 `file://` 打开；无需 HTTP 服务器或同目录资源。CSS、Three.js r170、模型及14个运行模块已内联为一个经典自执行脚本，内含 Three.js MIT 许可，无外部请求、模块加载或 CDN。
+生成 **`dist/roadster-rocket-standalone.html`**（当前约1.48 MB，已随代码提供）。只复制这一个文件即可离线分发，直接双击以 `file://` 打开；无需 HTTP 服务器或同目录资源。CSS、Three.js r170、模型及17个运行模块已内联为一个经典自执行脚本，内含 Three.js MIT 许可，无外部请求、模块加载或 CDN。
 
 - 功能包含城市模拟器、音效、HUD、自定义按键、三轴反转和起飞／落地辅助；**原资产查看器及图片库不包含在此分发文件内**。
 - 仍需当前浏览器支持 WebGL2／硬件加速；音频需首次用户交互。部分浏览器对 `file://` 的 `localStorage` 限制不同，禁用存储时自动退回当前会话内配置，不影响驾驶。
@@ -36,7 +36,7 @@ npm run build
 
 ```bash
 npm run test:single                         # 17项构建／语法／确定性／拒绝路径测试
-node --test scripts/test-simulator.mjs     # 原112项物理与输入测试
+node --test scripts/test-simulator.mjs     # 148项物理／输入／场景／相机／回放测试
 python3 scripts/test-standalone.py         # 可选 Playwright + Chromium，真实file://离线测试
 ```
 
@@ -64,12 +64,12 @@ python3 scripts/test-standalone.py         # 可选 Playwright + Chromium，真�
 - 浮层开启期间屏蔽驾驶输入。`Escape` 取消当前捕获，再按一次关闭浮层；`Tab` 保留焦点导航。
 - **Reset to Defaults** 恢复默认；默认地面 `W/S` 和飞行俯仰 `W/S` 可独立改键。左右 Shift（及其他修饰键）视为同一绑定。
 - 允许多个动作使用相同键；若分配给同一模式中的多个动作，会同时触发。浏览器或操作系统保留快捷键可能无法被页面捕获。
-- 地面 A/D 转向与飞行 Q/E 滚转响应保留上一轮驾驶反馈修正；默认飞行 A/D 偏航不变。
+- 地面 A/D 转向与飞行 Q/E 滚转响应保留上一轮驾驶反馈修正；v0.1 飞行 A/D 偏航已统一为 A=正Y、D=负Y，与地面转向基线一致；Yaw反转在此基线上生效。
 - **Invert Pitch / Invert Yaw / Invert Roll**：三轴独立反转，仅作用于飞行控制（包括 LANDING 的角度指令），绝不影响地面转向／油门。与按键配置一起保存，恢复默认时全部为 false。旧版本按键记录兼容加载。
 
 ### 控制与练习选项
 
-- **ASSISTED（辅助）**：正常飞行采用角速率内环。满足近地下降条件时切入 **LANDING ASSIST**：保留自动节流缓冲，Roll/Pitch 切换为绝对角度控制，按键满幅对应 ±30°，松杆目标为水平0°；Yaw仍为角速率。角度外环驱动速率PID，约0.2秒混合切换。进入条件为离地高度≤8m、车身朝上分量>0.65、下降>0.05m/s；爬升>0.25m/s、高度>8.5m或朝上分量≤0.60时退出，触地立即恢复地面法则。辅助受气压／推力限制，不保证安全着陆。
+- **ASSISTED（辅助）**：正常飞行采用角速率内环。满足近地下降条件时切入 **LANDING ASSIST**：使用线性下降率闭环：`v_d*=clamp(1.5+0.4375h,1.5,5)`，推力指令加速度 `g/up+3(v_d-v_d*)`。下降太慢会削减推力，不再悬停等待；h=0目标严格为1.5m/s，实际跟踪存在滞后，不保证精确触地速度。Roll/Pitch 切换为绝对角度控制，按键满幅对应 ±30°，松杆目标为水平0°；Yaw仍为角速率。角度外环驱动速率PID，约0.2秒混合切换。进入条件为离地高度≤8m、车身朝上分量>0.65、下降>0.05m/s；爬升>0.25m/s、高度>8.5m或朝上分量≤0.60时退出，触地立即恢复地面法则。辅助受气压／推力限制，不保证安全着陆。
 - **起飞 Pitch 保护**：地面→飞行时若油门或低头键仍按住，会暂时阻断双向Pitch，并显示 `RELEASE [当前物理按键] TO ENGAGE PITCH`。松开相关键后立即解除，重新按下可操纵。HUD／弹窗焦点切换不会视作物理松键，自动重复按键不能绕过保护。如果切出浏览器导致 keyup 丢失，重新按下并松开提示键即可解锁。
 - **DIRECT（直接）**：直接姿态喷口混控，不提供辅助模式的角速度闭环或近地下降辅助，需要自行反向操作制止旋转。
 - **ATTITUDE RATE（灵敏度）**：界面范围为 **90–360°/s**；在辅助模式中设置目标姿态角速度。直接模式使用固定喷口混控，不应把该数值理解为飞行器实际能达到的角速度保证。
@@ -77,6 +77,14 @@ python3 scripts/test-standalone.py         # 可选 Playwright + Chromium，真�
 - **Invincible**：练习用无敌选项，跳过坠毁判定；不移除重力或改变几何碰撞边界。
 - **Infinite gas**：无限储气，维持满气量与压力，不代表真实续航能力。
 - **RESET / R**：重新开始；进入 `CRASHED` 后用它解除锁定。
+
+### v0.1 相机、慢动作与回放
+
+- **相机 C**：3/4 Chase → Direct Chase → Top-down → Orbit。Orbit跟随车中心，鼠标／单指拖拽旋转、滚轮／双指缩放3–35m。模型和相机共享固定物理步之间的渲染插值；追踪相机平滑相对臂与航向，近垂直保留航向，切换视角／退出回放平滑过渡，避免高刷新率抖动。
+- **Bullet Time**：默认关闭；开启后仅离地（包括四轮离地滞回期间）按0.5x推进物理、控制器与模拟时钟，地面保持1x。HUD显示 `SLOW-MO 0.5x`。
+- **Record**：UI开启／停止，30Hz记录最多120秒／3601帧；新录制替换旧轨迹。按R或RESET结束录制并启用 `Play Replay`。
+- **Play Replay**：暂停物理与驾驶，插值位置／四元数、车轮、喷口及HUD；显示进度。`Exit Replay`、Esc或自然结束后还原进入回放前的停车状态，相机平滑返回。录制只保留当前内存，不导出、不保存NPC轨迹。
+- **2×2城市网格**：四路口中心(0,0)/(480,0)/(0,480)/(480,480)，地图边界−240～720m；道路／人行道顶面y=0，25个全局实例批，6辆NPC在双路口路线循环并按独立相位停车。
 
 ## 物理假设与数值步进
 
@@ -116,6 +124,7 @@ python3 scripts/test-standalone.py         # 可选 Playwright + Chromium，真�
 | `dist/simulator.js` | 场景集成、键盘、相机与固定步进主循环 |
 | `dist/simulator.css` | 模拟器界面样式 |
 | `dist/physics.js` | 刚体、悬挂、轮胎、地面接触、储气和着陆状态 |
+| `dist/camera-rig.js`, `dist/time-scale.js`, `dist/playback.js` | 相机／渲染插值、空中慢动作、轨迹录制与回放 |
 | `dist/controller.js` | 辅助／直接姿态控制与十喷口分配 |
 | `dist/keybinds.js`, `dist/keybind-panel.js` | 按键验证／飞行轴反转／模式映射／容错持久化与改键弹窗 |
 | `dist/takeoff-lock.js` | 起飞物理持键释放保护 |

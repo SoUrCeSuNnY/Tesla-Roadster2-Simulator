@@ -5,14 +5,14 @@ const degrees = value => finite(value) * 180 / Math.PI;
 const signed = (value, digits = 1) => `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`;
 
 /** Mount the cockpit. Angles are radians, pressure is Pa, and speeds are m/s. */
-export function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {}} = {}) {
-  const settings = {assisted: true, rate: 180, invincible: false, infinite: false};
+export function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {}, onRecord = () => {}, onReplay = () => {}, onExitReplay = () => {}} = {}) {
+  const settings = {assisted: true, rate: 180, invincible: false, infinite: false, bulletTime: false};
   const root = document.createElement('div');
   root.id = 'sim-hud';
   root.innerHTML = `
     <header class="sim-header">
       <div class="sim-brand"><span class="sim-eyebrow">EXPERIMENTAL VEHICLE PROGRAM / 01</span><h1>ROADSTER <span>/ ROCKET LAB</span></h1></div>
-      <div class="sim-mission"><span class="sim-status-dot"></span><strong id="sim-mode">GROUND</strong><span id="sim-assist-status">ASSIST READY</span><time id="sim-time">T+ 00:00</time></div>
+      <div class="sim-mission"><span class="sim-status-dot"></span><strong id="sim-mode">GROUND</strong><span id="sim-assist-status">ASSIST READY</span><span id="sim-camera-view">VIEW: 3/4 CHASE</span><span id="sim-record-status" hidden>REC</span><span id="sim-slow-mo" hidden>SLOW-MO 0.5x</span><time id="sim-time">T+ 00:00</time></div>
     </header>
     <div id="sim-pitch-warning" class="sim-pitch-warning" role="alert" aria-live="assertive" hidden></div>
     <aside class="sim-left" aria-label="Vehicle telemetry">
@@ -58,7 +58,8 @@ export function createUI({onReset = () => {}, onRefill = () => {}, onSettings = 
       <section class="sim-panel sim-controls" aria-label="Flight settings">
         <div class="sim-control-top"><span class="sim-eyebrow">FLIGHT CONTROL</span><div class="sim-mode-selector" role="group" aria-label="Control mode"><button id="sim-assisted" class="sim-selected" type="button" aria-pressed="true">ASSISTED</button><button id="sim-direct" type="button" aria-pressed="false">DIRECT</button></div></div>
         <div class="sim-rate-row"><label for="sim-rate">ATTITUDE RATE</label><input id="sim-rate" type="range" min="90" max="360" step="10" value="180"><output id="sim-rate-value" for="sim-rate">180°/s</output></div>
-        <div class="sim-options"><label><input id="sim-invincible" type="checkbox"><span>Invincible</span></label><label><input id="sim-infinite" type="checkbox"><span>Infinite gas</span></label><button id="sim-refill" type="button">REFILL <span>↗</span></button><button id="sim-reset" type="button">RESET <kbd data-key-action="reset">R</kbd></button></div>
+        <div class="sim-options"><label><input id="sim-invincible" type="checkbox"><span>Invincible</span></label><label><input id="sim-infinite" type="checkbox"><span>Infinite gas</span></label><label><input id="sim-bullet-time" type="checkbox"><span>Bullet Time</span></label><button id="sim-refill" type="button">REFILL <span>↗</span></button><button id="sim-reset" type="button">RESET <kbd data-key-action="reset">R</kbd></button></div>
+        <div class="sim-playback-controls"><button id="sim-record" type="button" aria-pressed="false">● Record</button><button id="sim-replay" type="button" disabled>▶ Play Replay</button><button id="sim-exit-replay" type="button" hidden>Exit Replay / Esc</button><output id="sim-replay-progress" hidden></output></div>
         <button id="sim-keybinds" type="button">KEYBINDS / CUSTOMIZE CONTROLS</button>
       </section>
       <details class="sim-panel sim-help" open>
@@ -95,13 +96,16 @@ export function createUI({onReset = () => {}, onRefill = () => {}, onSettings = 
     text('rate-value', `${settings.rate}°/s`);
     publish();
   });
-  for (const id of ['invincible', 'infinite']) {
-    listen($(id), 'change', event => { settings[id] = event.target.checked; publish(); });
+  for (const [id,key] of [['invincible','invincible'],['infinite','infinite'],['bullet-time','bulletTime']]) {
+    listen($(id), 'change', event => { settings[key] = event.target.checked; publish(); });
   }
   const dismissLanding = () => { clearTimeout(landingTimer); nodes.landing.hidden = true; };
   listen($('landing-close'), 'click', dismissLanding);
   listen($('reset'), 'click', () => { dismissLanding(); onReset(); });
   listen($('refill'), 'click', () => onRefill());
+  listen($('record'), 'click', () => onRecord());
+  listen($('replay'), 'click', () => onReplay());
+  listen($('exit-replay'), 'click', () => onExitReplay());
   // Keep cockpit keyboard interactions from also commanding the vehicle.
   for (const type of ['keydown', 'keyup']) listen(root, type, event => {
     if (event.target.matches('input, button, summary')) event.stopPropagation();
@@ -116,7 +120,18 @@ export function createUI({onReset = () => {}, onRefill = () => {}, onSettings = 
     const crashed = Boolean(state.crashed);
     root.classList.toggle('sim-crashed', crashed);
     root.classList.toggle('sim-low-gas', pressure < 5);
-    text('mode', crashed ? 'CRASHED' : state.mode === 'FLIGHT' ? 'FLIGHT' : 'GROUND');
+    text('camera-view', `VIEW: ${state.cameraView || '3/4 CHASE'}`);
+    nodes['slow-mo'].hidden = !state.slowMo;
+    text('record-status', state.replaying ? 'REPLAYING' : `● REC ${Math.max(0,finite(state.recordSeconds)).toFixed(1)}s`);
+    nodes['record-status'].hidden = !state.recording && !state.replaying;
+    nodes.record.disabled = Boolean(state.replaying);
+    nodes.record.setAttribute('aria-pressed',String(Boolean(state.recording)));
+    text('record', state.recording ? '■ Stop Recording' : '● Record');
+    nodes.replay.disabled = !state.replayReady || Boolean(state.replaying) || Boolean(state.recording);
+    nodes['exit-replay'].hidden = !state.replaying;
+    nodes['replay-progress'].hidden = !state.replaying;
+    text('replay-progress', `${Math.round(clamp(finite(state.replayProgress),0,1)*100)}%`);
+    text('mode', state.replaying ? 'REPLAYING' : crashed ? 'CRASHED' : state.mode === 'FLIGHT' ? 'FLIGHT' : 'GROUND');
     text('assist-status', settings.assisted ? (state.controlMode === 'LANDING' && state.mode === 'FLIGHT' ? 'LANDING ASSIST' : state.assistActive ? 'ASSIST ACTIVE' : 'ASSIST READY') : 'DIRECT CONTROL');
     nodes['pitch-warning'].hidden = !state.pitchLocked || state.mode !== 'FLIGHT';
     text('pitch-warning', `RELEASE [${state.pitchLockKeys || 'PITCH KEY'}] TO ENGAGE PITCH`);

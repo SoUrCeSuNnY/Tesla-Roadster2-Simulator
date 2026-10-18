@@ -1,20 +1,35 @@
 import * as THREE from './vendor/three.module.js';
-import { trafficPhase } from './world.js';
+import { trafficPhase, INTERSECTIONS, GRID_SPACING } from './world.js';
 
 const EXTENT = 238;
-const STOP = EXTENT - 26;
+const STOP_OFFSET = 26;
 
+// Rotate a local west-to-east approach onto a grid row or column.
 // Right-hand traffic: straight cars use the inner lane, right turns the outer.
-function route(approach, turning) {
+function route(approach, turning, origin) {
   const lane = turning ? 9.5 : 3.75;
   const radius = 15 - lane;
   const entryLength = EXTENT - 15;
   const arcLength = radius * Math.PI / 2;
   const angle = approach * Math.PI / 2;
-  const c = Math.cos(angle), s = Math.sin(angle);
+  const c = Math.round(Math.cos(angle)), s = Math.round(Math.sin(angle));
+  const intersectionAt = (x, z) => INTERSECTIONS.find(intersection =>
+    intersection.x === origin.x + c * x + s * z &&
+    intersection.z === origin.z - s * x + c * z).id;
+  const axis = approach % 2 === 0 ? 'x' : 'z';
   return {
-    axis: approach % 2 === 0 ? 'x' : 'z',
-    length: turning ? entryLength * 2 + arcLength : EXTENT * 2,
+    axis,
+    stops: [
+      { distance: EXTENT - STOP_OFFSET, intersection: intersectionAt(0, 0), axis },
+      turning
+        ? { distance: entryLength + arcLength + GRID_SPACING - STOP_OFFSET - 15,
+          intersection: intersectionAt(0, GRID_SPACING), axis: axis === 'x' ? 'z' : 'x' }
+        : { distance: EXTENT + GRID_SPACING - STOP_OFFSET,
+          intersection: intersectionAt(GRID_SPACING, 0), axis }
+    ],
+    turnStart: turning ? entryLength - 18 : Infinity,
+    turnEnd: turning ? entryLength + arcLength + 18 : Infinity,
+    length: turning ? entryLength * 2 + GRID_SPACING + arcLength : EXTENT * 2 + GRID_SPACING,
     sample(distance, position, tangent) {
       let x, z, dx, dz;
       if (!turning || distance <= entryLength) {
@@ -26,7 +41,7 @@ function route(approach, turning) {
       } else {
         x = -lane; z = 15 + distance - entryLength - arcLength; dx = 0; dz = 1;
       }
-      position.set(c * x + s * z, 0, -s * x + c * z);
+      position.set(origin.x + c * x + s * z, 0, origin.z - s * x + c * z);
       tangent.set(c * dx + s * dz, 0, -s * dx + c * dz);
     }
   };
@@ -53,6 +68,15 @@ export class NPCManager {
     const wheelGeometry = new THREE.CylinderGeometry(0.38, 0.38, 0.24, 10);
     const hubGeometry = new THREE.CylinderGeometry(0.22, 0.22, 0.255, 8);
     const colors = [0x719eb4, 0xd9b391, 0xc46d62, 0xd5dfe2, 0x6a8b83, 0xd7ba70];
+    const routes = [
+      route(0, false, { x: 0, z: 0 }),
+      route(2, false, { x: GRID_SPACING, z: GRID_SPACING }),
+      route(1, false, { x: 0, z: GRID_SPACING }),
+      route(3, false, { x: GRID_SPACING, z: 0 }),
+      route(0, true, { x: 0, z: 0 }),
+      route(2, true, { x: GRID_SPACING, z: GRID_SPACING })
+    ];
+    const spawns = [80, 350, 560, 140, 130, 340];
     for (let i = 0; i < 6; i++) {
       const car = new THREE.Group();
       car.name = `City car ${i + 1}`;
@@ -88,11 +112,12 @@ export class NPCManager {
         pivot.add(wheel, hub); car.add(pivot); wheels.push(pivot);
       }
       const turning = i >= 4;
-      const path = route(turning ? (i === 4 ? 1 : 3) : i, turning);
+      const path = routes[i];
       const state = {
-        mesh: car, route: path, distance: 80 + i * 21,
+        mesh: car, route: path, distance: spawns[i],
         speed: 8 + i * 0.4, cruise: 10 + (i % 3), wheels,
-        brakeMaterial, committed: false, turning, wheelAngle: 0
+        brakeMaterial, committed: false, turning, wheelAngle: 0,
+        nextStop: path.stops.filter(stop => stop.distance < spawns[i]).length
       };
       path.sample(state.distance, car.position, this._tangent);
       car.rotation.y = Math.atan2(this._tangent.x, this._tangent.z);
@@ -117,18 +142,19 @@ export class NPCManager {
       hasPlayer = Number.isFinite(this._player.x) && Number.isFinite(this._player.z);
     }
     for (let step = 0; step < steps; step++) {
-      const phase = trafficPhase(time - elapsed + (step + 1) * h);
+      const now = time - elapsed + (step + 1) * h;
       for (const car of this.cars) {
         const path = car.route;
-        const remaining = STOP - car.distance;
-        const signal = phase[path.axis];
-        // At amber, a car too close to brake comfortably clears the junction.
-        if (remaining >= 0 && signal === 'amber' && remaining < car.speed * car.speed / 7 + 1) car.committed = true;
-        if (car.distance > STOP + 0.05) car.committed = true;
+        const stop = path.stops[car.nextStop];
+        const remaining = stop ? stop.distance - car.distance : Infinity;
+        const signal = stop ? trafficPhase(now, stop.intersection)[stop.axis] : 'green';
+        // A stationary car must wait for green, not restart on amber.
+        if (remaining >= 0 && signal === 'amber' && car.speed > 0.5 &&
+            remaining < car.speed * car.speed / 7 + 1) car.committed = true;
         let target = car.cruise;
         let stopDistance = Infinity;
         if (!car.committed && signal !== 'green' && remaining >= 0) stopDistance = remaining;
-        if (car.turning && car.distance > 200 && car.distance < 243) target = 5;
+        if (car.distance > path.turnStart && car.distance < path.turnEnd) target = 5;
         path.sample(car.distance, this._position, this._tangent);
         // Lightweight avoidance: following cars and a player ahead in this lane.
         const obstacle = position => {
@@ -147,8 +173,14 @@ export class NPCManager {
         if (travel >= stopDistance) { travel = stopDistance; car.speed = 0; }
         car.distance += travel;
         car.brakeMaterial.emissiveIntensity = car.speed < oldSpeed - 0.001 || car.speed < 0.2 ? 2.4 : 0.45;
+        // Commitment belongs to one stop only, including after a right turn.
+        while (car.nextStop < path.stops.length && car.distance > path.stops[car.nextStop].distance) {
+          car.nextStop++;
+          car.committed = false;
+        }
         if (car.distance >= path.length) {
           car.distance %= path.length;
+          car.nextStop = 0;
           car.committed = false;
         }
         path.sample(car.distance, car.mesh.position, this._tangent);

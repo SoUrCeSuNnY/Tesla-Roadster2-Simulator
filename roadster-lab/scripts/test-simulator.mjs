@@ -2,11 +2,16 @@
 // Real rigid-body/controller integration and keybind units; no DOM, browser, or physics mocks.
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {Quaternion, Vector3} from '../dist/vendor/three.module.js';
+import {Quaternion, Vector3, PerspectiveCamera, Scene, Color} from '../dist/vendor/three.module.js';
 import {THRUSTERS} from '../dist/data.js';
 import {FlightController, MAX_PRESSURE, MAX_THRUST} from '../dist/controller.js';
 import {ACTIONS, DEFAULT_BINDINGS, DEFAULT_INVERSIONS, Keybinds, formatKey} from '../dist/keybinds.js';
 import {TakeoffPitchLock} from '../dist/takeoff-lock.js';
+import {CameraRig,CAMERA_VIEWS,RenderPose} from '../dist/camera-rig.js';
+import {simulationTimeScale} from '../dist/time-scale.js';
+import {Playback} from '../dist/playback.js';
+import {createWorld,INTERSECTIONS,GRID_SPACING,trafficPhase} from '../dist/world.js';
+import {NPCManager} from '../dist/npc.js';
 import {
   VehiclePhysics, G0, DRY_MASS, TANK_VOLUME, TANK_TEMPERATURE, INITIAL_GAS, STEP
 } from '../dist/physics.js';
@@ -66,8 +71,8 @@ function landing(options, settings = {}) {
 const commands = [
   // Pilot-requested roll inversion: Q commands -X, E commands +X.
   ['rollLeft', 'x', -1], ['rollRight', 'x', 1],
-  // Flight yaw is unchanged by the ground steering inversion: D +Y, A -Y.
-  ['right', 'y', 1], ['left', 'y', -1],
+  // Flight yaw follows ground steering's corrected baseline: D -Y, A +Y.
+  ['right', 'y', -1], ['left', 'y', 1],
   ['back', 'z', 1], ['forward', 'z', -1]
 ];
 
@@ -464,7 +469,7 @@ test('crashed body refuses motor and nozzle inputs; refill does not repair a cra
   assert(Math.abs(body.p.x - x) < .05);
 });
 
-test('assisted landing pulse brakes an actual descent and shuts off after touchdown', () => {
+test('assisted descent tracking reduces lift below target speed and lands firmly', () => {
   const body = airborne(5), controller = new FlightController();
   body.v.y = -3;
   run(body, 1); // Compute actual wheel altitude before controller observation.
@@ -475,9 +480,9 @@ test('assisted landing pulse brakes an actual descent and shuts off after touchd
   assert(out.slice(4, 8).every(t => t > 0), 'Automatic landing lift pulse');
   assert(out.slice(0, 4).every(t => t === 0) && out.slice(8).every(t => t === 0));
   const sumLift = out.slice(4, 8).reduce((sum, t) => sum + t * MAX_THRUST.lift, 0);
-  assert(sumLift > body.mass * G0, 'Pulse must provide net upward acceleration');
+  assert(sumLift < body.mass * G0, 'Descent below target must reduce lift below hover');
   body.step(STEP, {}, out);
-  assert(body.v.y > velocity, 'Pulse must actually reduce descent speed');
+  assert(body.v.y < velocity, 'Slow descent must accelerate toward the descent target');
   let activeFrames = 1;
   for (let i = 0; i < 240; i++) {
     run(body, 1, {}, {assisted: true}, controller);
@@ -485,7 +490,7 @@ test('assisted landing pulse brakes an actual descent and shuts off after touchd
     if (body.events.length) break;
   }
   assert(activeFrames > 5);
-  assert.equal(body.events[0]?.grade, 'S');
+  assert(['S','A'].includes(body.events[0]?.grade), 'Firm touchdown should remain safe');
   assert.equal(body.mode, 'GROUND');
   assert.equal(body.crashed, false);
   assert(body.gas < INITIAL_GAS);
@@ -788,6 +793,16 @@ function landingBody({heading = 0, roll = 0, pitch = 0} = {}) {
   body.step(1e-5); // Obtain real wheel clearance without an appreciable attitude change.
   return body;
 }
+// Translation-controlled attitude test rig: integrate real angular dynamics,
+// but reset only height/vertical velocity each tick. The firm descent law now
+// intentionally lands within ~3 s, shorter than the 5 s angle settling window.
+// Separate unrestrained trajectory regressions below verify actual touchdown.
+function runLandingAngles(body, frames, input, settings, controller) {
+  for (let i=0;i<frames;i++) {
+    body.p.y=7;body.v.y=-.2;
+    run(body,1,input,settings,controller);
+  }
+}
 function nozzleTorque(body, throttles) {
   const torque = new Vector3();
   for (const [i, nozzle] of THRUSTERS.entries()) {
@@ -826,7 +841,7 @@ for (const [angle, axis] of [['roll', 'x'], ['pitch', 'z']]) {
 test('LANDING neutral targets settle a combined pitch/roll disturbance across headings', () => {
   for (const heading of [0, 90, 225]) {
     const body = landingBody({heading, roll: 18, pitch: -14}), controller = new FlightController();
-    run(body, 300, {}, {assisted: true, infinite: true, rate: 90}, controller);
+    runLandingAngles(body, 300, {}, {assisted: true, infinite: true, rate: 90}, controller);
     assert.equal(controller.mode, 'LANDING');
     assert.deepEqual(controller.targetAngles, {roll: 0, pitch: 0});
     near(body.getAttitude().roll, 0, .3 * DEG);
@@ -844,15 +859,15 @@ for (const [key, angle, axis, sign] of [
     for (const heading of [0, 90, 225]) {
       const body = landingBody({heading}), controller = new FlightController();
       const settings = {assisted: true, rate: 90, infinite: true};
-      run(body, 300, {[key]: true}, settings, controller);
+      runLandingAngles(body, 300, {[key]: true}, settings, controller);
       assert.equal(controller.mode, 'LANDING');
       near(controller.targetAngles[angle], sign * 30 * DEG, 1e-12, 'radian target, not a rate');
       near(body.getAttitude()[angle], sign * 30 * DEG, .3 * DEG, `settled at heading=${heading}`);
       assert(body.omega.length() < .01, 'Holding the key must stop rotation at the target angle');
-      run(body, 30, {}, settings, controller);
+      runLandingAngles(body, 30, {}, settings, controller);
       assert.deepEqual(controller.targetAngles, {roll: 0, pitch: 0});
       assert(body.omega[axis] * sign < -.1, 'Release must produce actual restoring rotation');
-      run(body, 270, {}, settings, controller);
+      runLandingAngles(body, 270, {}, settings, controller);
       assert.equal(controller.mode, 'LANDING');
       near(body.getAttitude().roll, 0, .3 * DEG);
       near(body.getAttitude().pitch, 0, .3 * DEG);
@@ -873,7 +888,7 @@ test('LANDING blends pitch/roll over .2 seconds without blending yaw rate', () =
     near(controller.targetAngles.pitch, -Math.PI / 6, 1e-12);
     near(controller.targetRates[0], Math.PI - Math.PI / 2 * frame / 12, 1e-12);
     near(controller.targetRates[2], -Math.PI + Math.PI / 2 * frame / 12, 1e-12);
-    near(controller.targetRates[1], Math.PI, 1e-12, 'yaw always uses the requested rate');
+    near(controller.targetRates[1], -Math.PI, 1e-12, 'yaw always uses the requested rate');
   }
   body.v.y = .3;
   for (let frame = 1; frame <= 12; frame++) {
@@ -881,7 +896,7 @@ test('LANDING blends pitch/roll over .2 seconds without blending yaw rate', () =
     assert.equal(controller.mode, 'RATE');
     near(controller.targetRates[0], Math.PI / 2 + Math.PI / 2 * frame / 12, 1e-12);
     near(controller.targetRates[2], -Math.PI / 2 - Math.PI / 2 * frame / 12, 1e-12);
-    near(controller.targetRates[1], Math.PI, 1e-12);
+    near(controller.targetRates[1], -Math.PI, 1e-12);
   }
   controller.reset();
   assert.equal(controller.mode, 'GROUND');
@@ -891,9 +906,9 @@ test('LANDING blends pitch/roll over .2 seconds without blending yaw rate', () =
 });
 
 test('LANDING yaw remains a body-rate command while bank and level pitch settle', () => {
-  for (const [key, sign] of [['left', -1], ['right', 1]]) {
+  for (const [key, sign] of [['left', 1], ['right', -1]]) {
     const body = landingBody({heading: 90}), controller = new FlightController();
-    run(body, 300, {rollRight: true, [key]: true},
+    runLandingAngles(body, 300, {rollRight: true, [key]: true},
       {assisted: true, rate: 90, infinite: true}, controller);
     assert.equal(controller.mode, 'LANDING');
     near(controller.targetRates[1], sign * Math.PI / 2, 1e-12);
@@ -1188,4 +1203,339 @@ test('unrelated held keys never lock; ground/reset clear lock and allow the next
     assert.equal(lock.previousMode, 'GROUND');
     assert.equal(lock.update('FLIGHT', keys, bindings), true, 'A new takeoff must lock again');
   }
+});
+
+for (const height of [0, 1, 4, 8]) {
+  test(`linear descent target and exact closed-loop thrust at h=${height} m`, () => {
+    for (const ratio of [1, .5]) {
+      for (const tilt of [0, 30]) {
+        const body=landingBody({roll:tilt}), controller=new FlightController();
+        body.altitude=height;body.pressure=MAX_PRESSURE*ratio;
+        const up=Math.cos(tilt*DEG), target=1.5+.4375*height;
+        // Begin at the requested angle so allocator attitude corrections are zero.
+        const input=tilt?{rollRight:true}:{};
+        body.omega.set(0,0,0);
+        // Finish the .2 s rate-to-angle blend at the matching attitude target.
+        controller.update(.1,body,input,{assisted:true});
+        controller.update(.1,body,input,{assisted:true});
+        const actualUp=up;
+        for(const descent of [target+1,target,target-1,0,-.1]) {
+          body.v.y=-descent;
+          // First enter with descent, then exercise hover/ascent hysteresis.
+          if(!controller.landingActive){body.v.y=-1;controller.update(.1,body,input,{assisted:true});body.v.y=-descent;}
+          const out=controller.update(.1,body,input,{assisted:true});
+          near(controller.targetDescent,target,1e-12);
+          assert.equal(controller.mode,'LANDING');assert.equal(controller.assistActive,true);
+          const capacity=4*MAX_THRUST.lift*ratio*(1.93+1.97)/(2*1.97);
+          const acceleration=G0/actualUp+3*(descent-target);
+          const common=Math.max(0,Math.min(1,body.mass*acceleration/capacity));
+          if(!tilt){
+            near(out[4],common,1e-10,'front throttle matches mass/pressure-aware law');
+            near(out[6],common*1.93/1.97,1e-10,'rear throttle retains pitch trim');
+          }else if(common>.01&&common<.98){
+            near(out.slice(4,8).reduce((sum,t)=>sum+t*MAX_THRUST.lift*ratio,0),common*capacity,1e-6,'tilt compensation common force; residual attitude PID differentials cancel');
+          }
+          assert(out.every(t=>Number.isFinite(t)&&t>=0&&t<=1));
+        }
+      }
+    }
+  });
+}
+
+test('landing feedback cuts hover lift, brakes excess descent, and permits deliberate pilot lift', () => {
+  const body=landingBody(),controller=new FlightController();body.altitude=4;body.v.y=-1;
+  controller.update(STEP,body,{}, {assisted:true});
+  const force=out=>out.slice(4,8).reduce((sum,t)=>sum+t*MAX_THRUST.lift,0);
+  body.v.y=0;const hover=force(controller.update(STEP,body,{}, {assisted:true}));
+  assert(hover<body.mass*G0*.1,'Hover must receive much less than gravity compensation');
+  body.v.y=-6;const fast=force(controller.update(STEP,body,{}, {assisted:true}));
+  assert(fast>body.mass*G0,'Excess descent must brake');
+  body.v.y=0;assert(force(controller.update(STEP,body,{lift:true},{assisted:true}))>hover);
+  body.mode='GROUND';assert(controller.update(STEP,body,{}, {assisted:true}).every(t=>t===0));
+  assert.equal(controller.targetDescent,null);assert.equal(controller.mode,'GROUND');
+});
+
+for(const height of [1,4,8])for(const descent of [0,.1,3]) {
+  test(`unrestrained landing from ${height} m at ${descent} m/s touches down without hovering`,()=>{
+    const body=airborne(height+.795),controller=new FlightController();body.v.y=-descent;
+    body.step(1e-5);let frames=0,nearGroundHover=0;
+    for(;frames<240&&!body.events.length;frames++) {
+      run(body,1,{}, {assisted:true},controller);
+      if(body.mode==='FLIGHT'&&body.altitude<.5&&Math.abs(body.v.y)<.5)nearGroundHover++;
+    }
+    assert(body.events.length,'Must complete touchdown in under four seconds');
+    assert(frames<210);assert(nearGroundHover<3,'No near-ground hover tail');
+    assert.equal(body.crashed,false);assert.equal(body.mode,'GROUND');
+    const impact=-body.events[0].verticalSpeed;
+    assert(impact>1.2&&impact<2.3,`Firm touchdown, actual ${impact} m/s (target at h=0 is 1.5, not guaranteed exact tracking)`);
+  });
+}
+
+test('bullet time is opt-in and airborne-only including pre-FLIGHT contact hysteresis',()=>{
+  const body=new VehiclePhysics();assert.equal(simulationTimeScale(body,{}),1);
+  assert.equal(simulationTimeScale(body,{bulletTime:true}),1);
+  body.wheels.forEach(w=>w.contact=false);
+  assert.equal(body.mode,'GROUND');assert.equal(simulationTimeScale(body,{bulletTime:true}),.5);
+  body.wheels[0].contact=true;assert.equal(simulationTimeScale(body,{bulletTime:true}),1);
+  assert.equal(simulationTimeScale({mode:'FLIGHT'},{bulletTime:true}),.5);
+  assert.equal(simulationTimeScale({mode:'GROUND',grounded:false},{bulletTime:true}),.5);
+  assert.equal(simulationTimeScale({mode:'GROUND',wheels:[]},{bulletTime:true}),1);
+  assert.equal(simulationTimeScale({mode:'FLIGHT'},{bulletTime:false}),1);
+});
+
+test('bullet-time effective integration advances half simulation time and ground remains real-time',()=>{
+  const normal=airborne(200),slow=airborne(200);let t=0;
+  for(let i=0;i<60;i++){
+    normal.step(STEP);const dt=STEP*simulationTimeScale(slow,{bulletTime:true});slow.step(dt);t+=dt;
+  }
+  near(t,.5,1e-12);assert(slow.v.y<0&&Math.abs(slow.v.y)<Math.abs(normal.v.y)*.55);
+  const a=new VehiclePhysics(),b=new VehiclePhysics();
+  for(let i=0;i<60;i++){a.step(STEP,{forward:true});b.step(STEP*simulationTimeScale(b,{bulletTime:true}),{forward:true});}
+  assert(a.p.equals(b.p));assert(a.v.equals(b.v));
+});
+
+test('camera cycles four views, orbit tracks exact car center, and chase return is smooth',()=>{
+  const camera=new PerspectiveCamera(),rig=new CameraRig(camera),body=new VehiclePhysics();
+  rig.update(STEP,body,true);assert.equal(rig.mode,0);assert.equal(CAMERA_VIEWS.length,4);
+  assert.equal(rig.cycle(),1);assert.equal(rig.cycle(),2);assert.equal(rig.cycle(),3);
+  assert.equal(rig.name,'ORBIT');rig.update(STEP,body,true);
+  near(rig.target.distanceTo(body.p.clone().add(new Vector3(0,.7,0))),0,1e-12);
+  const offset=camera.position.clone().sub(rig.target);body.p.add(new Vector3(4,7,-3));rig.update(STEP,body);
+  near(camera.position.clone().sub(rig.target).distanceTo(offset),0,1e-10);
+  const before=camera.position.clone();assert.equal(rig.cycle(),0);assert(camera.position.equals(before));
+  rig.update(.01,body);assert(camera.position.distanceTo(before)>0);
+  assert(camera.position.distanceTo(before)<rig.desired.distanceTo(before));
+  assert.equal(rig.setMode(-1),false);assert.equal(rig.mode,0);
+});
+
+test('orbit wraps freely, clamps pitch and distance, and does not modify body state',()=>{
+  const camera=new PerspectiveCamera(),rig=new CameraRig(camera),body=new VehiclePhysics(),state=body.snapshot();
+  rig.update(STEP,body,true);const theta=rig.theta;rig.rotate(100,100);assert.equal(rig.theta,theta);
+  rig.setMode(3);rig.rotate(4000,-10000);assert(rig.theta<-Math.PI*2);near(rig.phi,.1,1e-12);
+  rig.rotate(0,10000);assert(rig.phi<Math.PI/2);rig.zoom(1000);assert.equal(rig.radius,35);
+  rig.zoom(.00001);assert.equal(rig.radius,3);rig.zoom(NaN);assert.equal(rig.radius,3);
+  rig.update(STEP,body);assert.deepEqual(body.snapshot(),state);
+});
+
+test('orbit pointer drag, two-touch pinch, cancellation and dispose lifecycle',()=>{
+  const listeners=new Map(),element={addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name),setPointerCapture(){}};
+  const rig=new CameraRig(new PerspectiveCamera(),element);rig.setMode(3);
+  const event=(id,x,y)=>({pointerId:id,clientX:x,clientY:y,pointerType:'touch',preventDefault(){}});
+  listeners.get('pointerdown')(event(1,0,0));const theta=rig.theta;
+  listeners.get('pointermove')(event(1,100,20));assert(rig.theta<theta);
+  listeners.get('pointerdown')(event(2,200,20));const radius=rig.radius;
+  listeners.get('pointermove')(event(2,300,20));assert(rig.radius<radius);
+  listeners.get('pointercancel')(event(1,100,20));assert.equal(rig.pointers.size,1);
+  listeners.get('pointerup')(event(2,300,20));assert.equal(rig.pointers.size,0);
+  rig.dispose();assert.equal(listeners.size,0);assert.equal(rig.pointers.size,0);
+});
+
+test('camera orientation and position stay continuous entering orbit and returning from minimum radius',()=>{
+  const camera=new PerspectiveCamera(),rig=new CameraRig(camera),body=new VehiclePhysics();
+  rig.setMode(2);rig.update(STEP,body,true);
+  for(const mode of [3,0]) {
+    if(mode===0){rig.radius=3;rig.update(STEP,body,true);}
+    const q=camera.quaternion.clone(),p=camera.position.clone();rig.setMode(mode);rig.update(.000001,body);
+    assert(camera.quaternion.angleTo(q)<.0001,'No one-frame lookAt snap');
+    assert(camera.position.distanceTo(p)<.001,'No top-down to orbit position snap');
+    for(let i=0;i<240;i++)rig.update(STEP,body);
+    assert.equal(rig.transitioning,false);
+  }
+});
+
+test('playback captures independent fixed-rate frames and reset enables replay',()=>{
+  const body=new VehiclePhysics(),recorder=new Playback();
+  assert.equal(recorder.start(body),false);recorder.startRecording(body);
+  for(let i=0;i<60;i++){body.step(STEP,{forward:true});recorder.record(STEP,body);}
+  assert.equal(recorder.frames.length,31);near(recorder.duration,1,1e-10);
+  const first=recorder.frames[0];assert.equal(first.pos[0],-38);
+  assert(first.wheels.every(w=>w.spin===0));assert(body.wheels.some(w=>w.spin!==0));
+  assert.equal(recorder.start(body),false,'Recording alone does not enable playback');
+  recorder.onReset(body);body.reset();assert.equal(recorder.recording,false);assert.equal(recorder.ready,true);
+  assert.equal(recorder.start(body),true);assert.equal(recorder.playing,true);
+});
+
+test('playback bounds recording length and memory at configured maximum',()=>{
+  const body=new VehiclePhysics(),recorder=new Playback({sampleRate:30,maxSeconds:2});
+  recorder.startRecording(body);for(let i=0;i<20000;i++)recorder.record(STEP,body);
+  assert.equal(recorder.recording,false);assert(recorder.frames.length<=61);near(recorder.duration,2,1e-8);
+  assert.throws(()=>new Playback({sampleRate:0}),RangeError);
+  assert.throws(()=>new Playback({maxSeconds:Infinity}),RangeError);
+});
+
+test('playback interpolates position quaternion wheel spin and nozzle telemetry without mutating frames',()=>{
+  const body=new VehiclePhysics(),recorder=new Playback({sampleRate:1});recorder.startRecording(body);
+  body.p.x+=10;body.q.setFromAxisAngle(new Vector3(0,1,0),Math.PI);body.wheels[0].spin=10;body.wheels[0].steer=.4;
+  body.throttles[0]=1;body.mode='FLIGHT';recorder.record(1,body);recorder.onReset(body);
+  const snapshot=JSON.stringify(recorder.frames),sample=recorder.sample(.5);
+  near(sample.pos[0],-33,1e-12);near(sample.wheels[0].spin,5,1e-12);near(sample.wheels[0].steer,.2,1e-12);near(sample.throttles[0],.5,1e-12);
+  near(new Quaternion().fromArray(sample.rot).angleTo(new Quaternion().setFromAxisAngle(new Vector3(0,1,0),Math.PI/2)),0,1e-6);
+  assert.equal(recorder.sample(1).mode,'FLIGHT');assert.equal(JSON.stringify(recorder.frames),snapshot);
+});
+
+test('playback exit and natural completion restore parked body without consuming recording',()=>{
+  const body=new VehiclePhysics(),recorder=new Playback();recorder.startRecording(body);
+  for(let i=0;i<60;i++){body.step(STEP,{forward:true});recorder.record(STEP,body);}
+  recorder.onReset(body);body.reset();const parked=body.snapshot(),position=body.p.clone();
+  assert(recorder.start(body));assert.equal(recorder.startRecording(body),false);
+  assert.equal(recorder.advance(.5,body),false);assert(body.p.x>position.x);near(recorder.progress,.5,1e-10);
+  assert.equal(recorder.advance(10,body),true);assert.equal(recorder.progress,1);
+  assert(recorder.exit(body));assert.equal(recorder.playing,false);assert.equal(recorder.exit(body),false);
+  assert.deepEqual(body.snapshot(),parked);assert(body.p.equals(position));assert(recorder.ready);
+  assert(recorder.start(body));assert(recorder.exit(body),'Can replay the same take again');
+});
+
+test('playback recording restarts replace the take and invalid dt never accumulates',()=>{
+  const body=new VehiclePhysics(),recorder=new Playback();recorder.startRecording(body);
+  for(const dt of [NaN,Infinity,0,-1])recorder.record(dt,body);
+  assert.equal(recorder.frames.length,1);assert.equal(recorder.duration,0);
+  recorder.onReset(body);assert.equal(recorder.ready,false);assert.equal(recorder.start(body),false);
+  recorder.startRecording(body);recorder.record(.1,body);recorder.stopRecording(body);
+  recorder.startRecording(body);assert.equal(recorder.frames.length,1);assert.equal(recorder.ready,false);
+});
+
+test('replay exit camera transition restores parked body immediately but eases chase and orbit pose',()=>{
+  for(const mode of [0,3])for(const distance of [4,100]){
+    const body=new VehiclePhysics(),recorder=new Playback(),camera=new PerspectiveCamera(),rig=new CameraRig(camera);
+    recorder.startRecording(body);body.p.x+=distance;recorder.record(1,body);recorder.onReset(body);body.reset();
+    rig.setMode(mode);rig.update(STEP,body,true);recorder.start(body);recorder.advance(1,body);rig.update(STEP,body,true);
+    const p=camera.position.clone(),q=camera.quaternion.clone();
+    recorder.exit(body);rig.rebase(body);rig.update(.000001,body);
+    assert.equal(body.p.x,-38);assert(camera.position.distanceTo(p)<.001);
+    assert(camera.quaternion.angleTo(q)<.0001);
+    for(let i=0;i<240;i++)rig.update(STEP,body);
+    assert.equal(rig.transitioning,false);
+  }
+});
+
+test('2x2 grid has four connected intersections and all roads and sidewalks meet y=0',()=>{
+  const world=createWorld(new Scene());
+  assert.equal(GRID_SPACING,480);assert.deepEqual(INTERSECTIONS.map(t=>[t.x,t.z]),[[0,0],[480,0],[0,480],[480,480]]);
+  assert.deepEqual(world.bounds,{min:-240,max:720});
+  assert(world.surfaces.some(s=>s.kind==='sidewalk'));assert(world.surfaces.every(s=>s.top===0));
+  for(let i=0;i<world.surfaces.length;i++)for(let j=i+1;j<world.surfaces.length;j++){
+    const a=world.surfaces[i],b=world.surfaces[j];
+    const overlapX=(a.width+b.width)/2-Math.abs(a.x-b.x),overlapZ=(a.depth+b.depth)/2-Math.abs(a.z-b.z);
+    assert(!(overlapX>1e-8&&overlapZ>1e-8),`No coplanar overlapping ${a.kind}/${b.kind} at ${a.x},${a.z}`);
+  }
+  for(const axis of ['x','z'])for(const row of [0,480])for(let d=-240;d<=720;d+=2){
+    const x=axis==='x'?d:row,z=axis==='z'?d:row;
+    assert(world.surfaces.some(s=>s.kind==='road'&&Math.abs(x-s.x)<=s.width/2&&Math.abs(z-s.z)<=s.depth/2),`No road gap ${x},${z}`);
+    assert.equal(world.groundHeight(x,z),0);
+  }
+});
+
+test('four tiled city geometry and traffic lights remain globally instanced in 25 draw batches',()=>{
+  const world=createWorld(new Scene()),meshes=world.root.children.filter(o=>o.isMesh);
+  assert.equal(world.batchCount,25);assert.equal(meshes.length,25);assert(meshes.every(m=>m.isInstancedMesh));
+  assert(meshes.reduce((sum,m)=>sum+m.count,0)>60000);
+  assert.equal(world.signals.length,96);
+  const lampMeshes=meshes.filter(m=>world.signals.some(s=>s.key===`lamp:${m.material.uuid}`));
+  assert.equal(lampMeshes.length,3);assert(lampMeshes.every(m=>m.material.isMeshBasicMaterial),'Instance-colored lamps must not have phase-independent white emission');
+  for(const tile of INTERSECTIONS)assert.equal(world.signals.filter(s=>s.intersection===tile.id).length,24);
+  for(const time of [0,14,17,19,33,36,50]){
+    world.update(time);
+    for(const signal of world.signals){
+      const mesh=meshes.find(m=>m.material.uuid===signal.key.slice(5)),color=new Color();mesh.getColorAt(signal.index,color);
+      const active=trafficPhase(time,signal.intersection)[signal.axis]===signal.state;
+      const expected=new Color(active?signal.color:0x080b10);
+      near(color.r,expected.r,1e-7);near(color.g,expected.g,1e-7);near(color.b,expected.b,1e-7);
+    }
+  }
+});
+
+test('per-intersection signals are periodic staggered and never green for conflicting axes',()=>{
+  for(const tile of INTERSECTIONS)for(let t=-40;t<100;t+=.5){
+    const phase=trafficPhase(t,tile.id);assert(!(phase.x==='green'&&phase.z==='green'));
+    assert.deepEqual(phase,trafficPhase(t+38,tile.id));
+  }
+  assert.notDeepEqual(trafficPhase(10,0),trafficPhase(10,3));
+});
+
+test('NPC routes visit two junctions and stay on continuous grid road lanes',()=>{
+  const npcs=new NPCManager(new Scene()),p=new Vector3(),t=new Vector3();assert.equal(npcs.cars.length,6);
+  for(const car of npcs.cars){
+    assert.equal(car.route.stops.length,2);assert.notEqual(car.route.stops[0].intersection,car.route.stops[1].intersection);
+    for(let distance=0;distance<=car.route.length;distance+=2){
+      car.route.sample(distance,p,t);assert(p.x>=-240&&p.x<=720&&p.z>=-240&&p.z<=720);near(t.length(),1,1e-12);
+      assert([0,480].some(c=>Math.abs(p.x-c)<15||Math.abs(p.z-c)<15));assert.equal(p.y,0);
+    }
+  }
+});
+
+test('NPC stops at either grid junction red/amber, restarts green and avoids player',()=>{
+  const manager=new NPCManager(new Scene());
+  for(const source of [...manager.cars])for(let index=0;index<2;index++){
+    manager.cars=[source];const stop=source.route.stops[index];
+    const find=phase=>{for(let t=0;t<38;t+=.25)if(trafficPhase(t,stop.intersection)[stop.axis]===phase)return t+.1;};
+    source.distance=stop.distance-.1;source.speed=0;source.nextStop=index;source.committed=false;
+    const before=source.distance;manager.update(STEP,find('red'));assert.equal(source.distance,before);
+    manager.update(STEP,find('amber'));assert.equal(source.distance,before);
+    manager.update(STEP,find('green'));assert(source.distance>before);
+  }
+  const car=manager.cars[0],stop=car.route.stops[0];car.distance=10;car.nextStop=0;car.committed=false;car.speed=0;
+  const player=new Vector3(),tangent=new Vector3();car.route.sample(10,player,tangent);player.addScaledVector(tangent,5);
+  manager.update(STEP,0,{position:player});assert.equal(car.distance,10);
+});
+
+test('NPC grid traffic remains finite and traverses multiple intersections over three minutes',()=>{
+  const manager=new NPCManager(new Scene()),seen=manager.cars.map(()=>new Set()),wraps=manager.cars.map(()=>0),stopped=new Set();
+  for(let i=0;i<10800;i++){
+    const previous=manager.cars.map(c=>c.distance);manager.update(STEP,i*STEP);
+    manager.cars.forEach((c,index)=>{
+      assert(Number.isFinite(c.mesh.position.lengthSq())&&Number.isFinite(c.speed));
+      assert(c.mesh.position.x>=-240&&c.mesh.position.x<=720&&c.mesh.position.z>=-240&&c.mesh.position.z<=720);
+      if(c.distance<previous[index])wraps[index]++;
+      for(const stop of c.route.stops)if(Math.abs(c.distance-stop.distance)<30)seen[index].add(stop.intersection);
+      if(c.speed<.1)stopped.add(index);
+    });
+  }
+  assert(seen.every(s=>s.size===2));assert(wraps.every(n=>n>=1));assert(stopped.size>=4);
+});
+
+test('render pose interpolates fixed physics ticks at 144 Hz without chase-relative jitter',()=>{
+  const body=new VehiclePhysics(),pose=new RenderPose(body),camera=new PerspectiveCamera(),rig=new CameraRig(camera);
+  rig.update(STEP,pose,true);let accumulator=0,previous=null;const speeds=[];
+  for(let i=0;i<144;i++){
+    accumulator+=1/144;
+    while(accumulator>=STEP){pose.capture(body);body.p.x+=20*STEP;accumulator-=STEP;}
+    pose.sample(body,accumulator/STEP);rig.update(1/144,pose);
+    const relative=camera.position.clone().sub(pose.p);
+    near(relative.x,-10.5,1e-10);near(relative.y,4.5,1e-10);near(relative.z,5.4,1e-10);
+    if(previous!==null&&i>4)speeds.push((pose.p.x-previous)*144);
+    previous=pose.p.x;
+  }
+  for(const speed of speeds)near(speed,20,1e-9);
+  pose.capture(body);body.q.setFromAxisAngle(new Vector3(0,1,0),Math.PI/2);pose.sample(body,.5);
+  near(pose.q.angleTo(new Quaternion().setFromAxisAngle(new Vector3(0,1,0),Math.PI/4)),0,1e-6);
+  const physicsX=body.p.x;pose.p.x=-999;assert.equal(body.p.x,physicsX,'Render state never modifies physics');
+});
+
+test('camera heading stays continuous through near-vertical attitudes and +/-pi wrap',()=>{
+  const body=new VehiclePhysics(),camera=new PerspectiveCamera(),rig=new CameraRig(camera);
+  body.q.setFromAxisAngle(new Vector3(0,1,0),Math.PI*.75);rig.update(STEP,body,true);
+  const heading=rig.heading;
+  body.q.multiply(new Quaternion().setFromAxisAngle(new Vector3(0,0,1),Math.PI/2));rig.update(STEP,body);
+  near(rig.heading,heading,1e-12,'Vertical forward vector retains last heading');
+  body.q.setFromAxisAngle(new Vector3(0,1,0),Math.PI-.01);rig.update(STEP,body,true);
+  const before=rig.heading;body.q.setFromAxisAngle(new Vector3(0,1,0),-Math.PI+.01);rig.update(STEP,body);
+  assert(Math.abs(rig.heading-before)<.01,'Heading uses shortest arc, never jumps 2pi');
+});
+
+test('camera mode changes settle on a moving car instead of permanent world-space chase lag',()=>{
+  const body=new VehiclePhysics(),camera=new PerspectiveCamera(),rig=new CameraRig(camera);
+  rig.update(STEP,body,true);
+  for(const [speed,dt,frames] of [[20,1/144,360],[60,.1,25]])for(const mode of [1,2,3,0]){
+    rig.setMode(mode);
+    for(let i=0;i<frames;i++){body.p.x+=speed*dt;rig.update(dt,body);}
+    assert.equal(rig.transitioning,false,`moving transition ${mode} must complete`);
+    assert(camera.position.distanceTo(rig.desired)<.02);
+  }
+});
+
+test('discarding accumulator synchronizes render history instead of rewinding the next frame',()=>{
+  const body=new VehiclePhysics(),pose=new RenderPose(body);pose.capture(body);body.p.x+=.333;
+  pose.sample(body,.9);const before=pose.p.x;
+  pose.reset(body);pose.sample(body,.4);
+  assert(pose.p.x>=before);assert(pose.p.equals(body.p));
 });

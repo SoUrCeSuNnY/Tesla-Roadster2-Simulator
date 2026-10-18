@@ -17,7 +17,7 @@ const run = promisify(execFile);
 const expectedFiles = [
   'vendor/three.module.js', 'data.js', 'model.js', 'controller.js', 'physics.js',
   'world.js', 'npc.js', 'ui.js', 'audio.js', 'effects.js', 'keybinds.js',
-  'keybind-panel.js', 'takeoff-lock.js', 'simulator.js'
+  'keybind-panel.js', 'takeoff-lock.js', 'camera-rig.js', 'time-scale.js', 'playback.js', 'simulator.js'
 ];
 
 async function temporary(t) {
@@ -43,7 +43,7 @@ test('real build is self-contained, complete, deterministic, and leaves inputs i
   const html = await fs.readFile(output, 'utf8');
   assert.equal(result.output, output);
   assert.equal(result.entry, 'simulator.js');
-  assert.equal(result.modules, 14);
+  assert.equal(result.modules, 17);
   assert.deepEqual([...result.files].sort(), [...expectedFiles].sort());
   assert.equal(result.bytes, Buffer.byteLength(html));
   assert(result.bytes > 1_000_000 && result.bytes < 3_000_000, `unexpected size: ${result.bytes}`);
@@ -88,7 +88,7 @@ test('package build aliases and CLI work independently of cwd; retain default de
   assert.equal(stderr, '');
   const result = JSON.parse(stdout);
   assert.equal(result.output, path.join(dist, 'roadster-rocket-standalone.html'));
-  assert.equal(result.modules, 14);
+  assert.equal(result.modules, 17);
   const html = await fs.readFile(result.output, 'utf8');
   assert.equal(result.bytes, Buffer.byteLength(html));
   classicScript(html);

@@ -39,6 +39,7 @@ export class FlightController {
     this.assistActive = false;
     this.landingActive = false;
     this.mode = 'GROUND';
+    this.targetDescent = null;
   }
 
   /**
@@ -51,6 +52,7 @@ export class FlightController {
     const out = this.throttles;
     out.fill(0);
     this.assistActive = false;
+    this.targetDescent = null;
     dt = clamp(finite(dt), 0, .1);
     if (body.mode !== 'FLIGHT') {
       this.reset();
@@ -75,9 +77,9 @@ export class FlightController {
     const weights = [frontWeight, frontWeight, rearWeight, rearWeight];
     const omega = [finite(body.omega?.x), finite(body.omega?.y), finite(body.omega?.z)];
     // Pilot-facing roll convention: Q/rollLeft commands negative body-X,
-    // E/rollRight positive. Yaw and pitch signs are intentionally unchanged.
+    // E/rollRight positive. Flight yaw now shares ground's D=-Y/A=+Y baseline.
     const axes = [Number(!!input.rollRight) - Number(!!input.rollLeft),
-      Number(!!input.right) - Number(!!input.left),
+      Number(!!input.left) - Number(!!input.right),
       Number(!!input.back) - Number(!!input.forward)];
     const rate = clamp(finite(settings.rate, 180), 90, 360) * DEG;
     let requestedLift = input.lift ? 1 : 0;
@@ -97,12 +99,12 @@ export class FlightController {
       this.landingActive = height >= 0 && (wasLanding
         ? up > .60 && height <= 8.5 && descent > -.25
         : up > .65 && height <= 8 && descent > .05);
-      if (this.landingActive && up > .65 && height <= 8 && descent > .05 && pressure > 1e-9) {
-        // Stop before wheel contact, not at COM height. Available thrust limits
-        // the request; even an unrecoverable descent receives maximum braking.
-        const distance = Math.max(.15, height - .15);
-        const acceleration = 9.81 + descent * descent / (2 * distance);
-        const capacity = 2 * liftForce * (frontWeight + rearWeight) * up;
+      if (this.landingActive && up > .65 && height <= 8 && pressure > 1e-9) {
+        // Track a firm descent, not a zero-speed stopping point. Continue the
+        // feedback at hover/small ascent after entry: negative error cuts lift.
+        this.targetDescent = clamp(1.5 + .4375 * height, 1.5, 5);
+        const acceleration = 9.80665 / up + 3 * (descent - this.targetDescent);
+        const capacity = 2 * liftForce * (frontWeight + rearWeight);
         requestedLift = Math.max(requestedLift, clamp(mass * acceleration / capacity, 0, 1));
         this.assistActive = true;
       }

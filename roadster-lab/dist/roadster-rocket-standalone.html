@@ -50,9 +50,11 @@ body { background: #060d18; }
 .sim-eyebrow { display: block; color: var(--sim-muted); font-size: 9px; letter-spacing: 1.7px; }
 #sim-hud h1 { font: 700 29px/1.1 'Barlow Condensed', 'Arial Narrow', sans-serif; letter-spacing: 1.5px; margin-top: 6px; }
 #sim-hud h1 span { color: var(--sim-cyan); font-weight: 500; }
-.sim-mission { display: flex; align-items: center; gap: 13px; font-size: 10px; letter-spacing: 1px; }
+.sim-mission { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 13px; font-size: 10px; letter-spacing: 1px; }
 .sim-mission strong { letter-spacing: 2px; color: var(--sim-cyan); }
 .sim-mission time { padding-left: 17px; border-left: 1px solid var(--sim-line); color: var(--sim-muted); }
+#sim-slow-mo { color: #ffab61; }
+#sim-camera-view { color: #9aaec2; font-size: 9px; }
 #sim-assist-status { color: var(--sim-muted); font-size: 9px; }
 #sim-assist-status.sim-active { color: var(--sim-cyan); }
 .sim-status-dot, .sim-orange-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--sim-cyan); box-shadow: 0 0 12px #65e5ed70; }
@@ -122,7 +124,7 @@ body { background: #060d18; }
 .sim-rate-row { display: flex; align-items: center; gap: 12px; margin: 15px 0; font-size: 9px; color: var(--sim-muted); }
 .sim-rate-row input { flex: 1; min-width: 40px; accent-color: var(--sim-cyan); height: 16px; cursor: pointer; }
 .sim-rate-row output { min-width: 52px; color: var(--sim-cyan); text-align: right; }
-.sim-options { display: flex; align-items: center; gap: 11px; border-top: 1px solid var(--sim-line); padding-top: 12px; }
+.sim-options { display: flex; flex-wrap: wrap; align-items: center; gap: 11px; border-top: 1px solid var(--sim-line); padding-top: 12px; }
 .sim-options label { display: flex; align-items: center; gap: 5px; font-size: 9px; color: #c4d3e1; white-space: nowrap; cursor: pointer; }
 .sim-options input { margin: 0; width: 13px; height: 13px; accent-color: var(--sim-cyan); }
 #sim-hud .sim-options button { font-size: 9px; padding: 7px 9px; white-space: nowrap; }
@@ -272,6 +274,11 @@ body { background: #060d18; }
 }
 @media (prefers-reduced-motion: reduce) { .sim-landing { animation: none; } }
 
+.sim-playback-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+#sim-hud .sim-playback-controls button { padding: 6px 9px; font-size: 9px; }
+#sim-hud button:disabled { opacity: .4; cursor: not-allowed; }
+#sim-record[aria-pressed="true"], #sim-record-status { color: #ff8188; }
+#sim-replay-progress { color: #65e5ed; }
 #sim-keybinds { margin-top: 12px; padding: 7px 10px; width: 100%; letter-spacing: 1px; color: var(--sim-cyan); }
 #sim-keybind-dialog { width: min(600px, calc(100vw - 28px)); max-height: calc(100dvh - 36px); padding: 24px; border: 1px solid #45677e; border-radius: 10px; color: #edf5fc; background: #0d1c2c; box-shadow: 0 30px 120px #000c; font: 12px/1.5 ui-monospace, monospace; }
 #sim-keybind-dialog::backdrop { background: #030b16bb; backdrop-filter: blur(5px); }
@@ -55522,6 +55529,7 @@ class FlightController {
     this.assistActive = false;
     this.landingActive = false;
     this.mode = 'GROUND';
+    this.targetDescent = null;
   }
 
   /**
@@ -55534,6 +55542,7 @@ class FlightController {
     const out = this.throttles;
     out.fill(0);
     this.assistActive = false;
+    this.targetDescent = null;
     dt = clamp(finite(dt), 0, .1);
     if (body.mode !== 'FLIGHT') {
       this.reset();
@@ -55558,9 +55567,9 @@ class FlightController {
     const weights = [frontWeight, frontWeight, rearWeight, rearWeight];
     const omega = [finite(body.omega?.x), finite(body.omega?.y), finite(body.omega?.z)];
     // Pilot-facing roll convention: Q/rollLeft commands negative body-X,
-    // E/rollRight positive. Yaw and pitch signs are intentionally unchanged.
+    // E/rollRight positive. Flight yaw now shares ground's D=-Y/A=+Y baseline.
     const axes = [Number(!!input.rollRight) - Number(!!input.rollLeft),
-      Number(!!input.right) - Number(!!input.left),
+      Number(!!input.left) - Number(!!input.right),
       Number(!!input.back) - Number(!!input.forward)];
     const rate = clamp(finite(settings.rate, 180), 90, 360) * DEG;
     let requestedLift = input.lift ? 1 : 0;
@@ -55580,12 +55589,12 @@ class FlightController {
       this.landingActive = height >= 0 && (wasLanding
         ? up > .60 && height <= 8.5 && descent > -.25
         : up > .65 && height <= 8 && descent > .05);
-      if (this.landingActive && up > .65 && height <= 8 && descent > .05 && pressure > 1e-9) {
-        // Stop before wheel contact, not at COM height. Available thrust limits
-        // the request; even an unrecoverable descent receives maximum braking.
-        const distance = Math.max(.15, height - .15);
-        const acceleration = 9.81 + descent * descent / (2 * distance);
-        const capacity = 2 * liftForce * (frontWeight + rearWeight) * up;
+      if (this.landingActive && up > .65 && height <= 8 && pressure > 1e-9) {
+        // Track a firm descent, not a zero-speed stopping point. Continue the
+        // feedback at hover/small ascent after entry: negative error cuts lift.
+        this.targetDescent = clamp(1.5 + .4375 * height, 1.5, 5);
+        const acceleration = 9.80665 / up + 3 * (descent - this.targetDescent);
+        const capacity = 2 * liftForce * (frontWeight + rearWeight);
         requestedLift = Math.max(requestedLift, clamp(mass * acceleration / capacity, 0, 1));
         this.assistActive = true;
       }
@@ -55891,8 +55900,12 @@ const THREE = __deps[0];
 
 
 // Seconds, shared by the visible signals and NPCs. Both axes are red during clearance.
-function trafficPhase(time = 0) {
-  const t = ((time % 38) + 38) % 38;
+const GRID_SPACING = 480;
+const INTERSECTIONS = Object.freeze([0,1,2,3].map(id=>Object.freeze({id,x:(id%2)*GRID_SPACING,z:Math.floor(id/2)*GRID_SPACING})));
+
+function trafficPhase(time = 0, intersectionId = 0) {
+  const shifted=time+intersectionId*4;
+  const t = ((shifted % 38) + 38) % 38;
   return {
     x: t < 14 ? 'green' : t < 17 ? 'amber' : 'red',
     z: t >= 19 && t < 33 ? 'green' : t >= 33 && t < 36 ? 'amber' : 'red'
@@ -55907,10 +55920,10 @@ function createWorld(scene) {
   scene.fog = new THREE.FogExp2(0xa8bacd, 0.0025);
   const sky = new THREE.HemisphereLight(0xc5dcff, 0x6c625c, 1.8);
   const sun = new THREE.DirectionalLight(0xffc298, 2.6);
-  sun.position.set(-110, 130, 75);
+  sun.position.set(130, 250, 315);sun.target.position.set(240,0,240);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  Object.assign(sun.shadow.camera, { left: -110, right: 110, top: 110, bottom: -110, near: 1, far: 400 });
+  Object.assign(sun.shadow.camera, { left: -540, right: 540, top: 540, bottom: -540, near: 1, far: 1200 });
   sun.shadow.bias = -0.0005;
   sun.shadow.normalBias = 0.08;
   root.add(sky, sun, sun.target);
@@ -55932,15 +55945,19 @@ function createWorld(scene) {
     box: new THREE.BoxGeometry(1, 1, 1),
     cylinder: new THREE.CylinderGeometry(0.5, 0.5, 1, 8),
     crown: new THREE.IcosahedronGeometry(0.5, 0),
-    cone: new THREE.ConeGeometry(0.5, 1, 7)
+    cone: new THREE.ConeGeometry(0.5, 1, 7),
+    lamp: new THREE.SphereGeometry(0.26, 8, 6)
   };
   // Batch static detail by material/geometry: thousands of windows, few draw calls.
   const batches = new Map();
   const transform = new THREE.Object3D();
+  let tileX=0,tileZ=0;
+  const surfaces=[];
   function shape(kind, mat, x, y, z, sx, sy, sz, rotation = 0) {
+    if(mat===m.asphalt||mat===m.grass||mat===m.paving||mat===m.curb&&y<0)surfaces.push({kind:mat===m.asphalt?'road':mat===m.grass?'grass':mat===m.paving?'sidewalk':'curb',x:x+tileX,z:z+tileZ,width:sx,depth:sz,top:y+sy/2});
     const key = `${kind}:${mat.uuid}`;
     if (!batches.has(key)) batches.set(key, { kind, mat, matrices: [] });
-    transform.position.set(x, y, z);
+    transform.position.set(x+tileX, y, z+tileZ);
     transform.rotation.set(0, rotation, 0);
     transform.scale.set(sx, sy, sz);
     transform.updateMatrix();
@@ -55948,15 +55965,23 @@ function createWorld(scene) {
   }
   const box = (mat, x, y, z, sx, sy, sz, rotation = 0) => shape('box', mat, x, y, z, sx, sy, sz, rotation);
 
+  const signals=[];
+  const signalMaterials={};
+  for(const state of ['red','amber','green'])signalMaterials[state]=new THREE.MeshBasicMaterial({color:0xffffff});
+  for(const tile of INTERSECTIONS){
+  tileX=tile.x;tileZ=tile.z;
   // Every ground surface has its top at exactly y=0. No heightfield or collision mesh.
   box(m.asphalt, 0, -0.1, 0, 480, 0.2, 30);
   for (const side of [-1, 1]) box(m.asphalt, 0, -0.1, side * 127.5, 30, 0.2, 225);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-    box(m.grass, sx * 127.5, -0.1, sz * 127.5, 225, 0.2, 225);
-    box(m.paving, sx * 127.5, 0.08, sz * 18, 225, 0.16, 6);
-    box(m.paving, sx * 18, 0.08, sz * 130.5, 6, 0.16, 219);
-    box(m.curb, sx * 127.5, 0.12, sz * 15.2, 225, 0.24, 0.35);
-    box(m.curb, sx * 15.2, 0.12, sz * 127.5, 0.35, 0.24, 225);
+    // Disjoint coplanar footprints: grass begins beyond the sidewalks and
+    // excludes the 26x26 plaza. Shared y=0 must not mean overlapping faces.
+    for(const [x0,x1,z0,z1] of [[21,240,21,25],[21,240,51,240],[21,25,25,51],[51,240,25,51]])
+      box(m.grass,sx*(x0+x1)/2,-.1,sz*(z0+z1)/2,x1-x0,.2,z1-z0);
+    box(m.paving, sx * 127.6875, -0.08, sz * 18.1875, 224.625, 0.16, 5.625);
+    box(m.paving, sx * 18.1875, -0.08, sz * 130.5, 5.625, 0.16, 219);
+    box(m.curb, sx * 127.6875, -0.12, sz * 15.1875, 224.625, 0.24, 0.375);
+    box(m.curb, sx * 15.1875, -0.12, sz * 127.5, 0.375, 0.24, 225);
   }
   for (let d = -234; d <= 234; d += 12) {
     if (Math.abs(d) < 29) continue;
@@ -56008,7 +56033,7 @@ function createWorld(scene) {
       building(x, z, 22 + random() * 14, 22 + random() * 14,
         12 + random() * 38 + (ix + iz > 3 ? 12 : 0), index++);
     }
-    box(m.paving, sx * 38, 0.06, sz * 38, 26, 0.12, 26);
+    box(m.paving, sx * 38, -0.06, sz * 38, 26, 0.12, 26);
     box(m.soil, sx * 38, 0.28, sz * 38, 12, 0.56, 12);
     // Benches around the small corner gardens.
     for (const offset of [-9, 9]) {
@@ -56047,37 +56072,25 @@ function createWorld(scene) {
     }
   }
 
-  const signals = [];
-  const lampGeometry = new THREE.SphereGeometry(0.26, 8, 6);
-  for (let approach = 0; approach < 4; approach++) {
-    const angle = approach * Math.PI / 2;
-    const signal = new THREE.Group();
-    signal.rotation.y = angle;
-    // Base approach travels +X. Its signal faces -X, toward oncoming drivers.
-    signal.position.set(-22 * Math.cos(angle) + 16.8 * Math.sin(angle), 0,
-      22 * Math.sin(angle) + 16.8 * Math.cos(angle));
-    root.add(signal);
-    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.16, 7.5, 8), m.metal);
-    pole.position.y = 3.75;
-    signal.add(pole);
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.18, 13), m.metal);
-    arm.position.set(0, 7.4, -6.4);
-    signal.add(arm);
-    for (const offset of [-5.5, -12]) {
-      const housing = new THREE.Mesh(new THREE.BoxGeometry(0.65, 2.2, 0.9), m.metal);
-      housing.position.set(0, 6.5, offset);
-      signal.add(housing);
-      const lamps = {};
-      for (const [state, color, y] of [['red', 0xff5148, 7.18], ['amber', 0xffc34d, 6.5], ['green', 0x65efbc, 5.82]]) {
-        const mat = material(color, { emissive: color, emissiveIntensity: 0 });
-        const lamp = new THREE.Mesh(lampGeometry, mat);
-        lamp.position.set(-0.36, y, offset);
-        signal.add(lamp);
-        lamps[state] = mat;
+  // Traffic poles, arms, housings and all lamps join global material batches.
+  // Four tiles therefore add instances, not four copies of every draw call.
+  for(let approach=0;approach<4;approach++){
+    const angle=approach*Math.PI/2,c=Math.cos(angle),s=Math.sin(angle);
+    const baseX=-22*c+16.8*s,baseZ=22*s+16.8*c;
+    const signalShape=(kind,mat,x,y,z,sx,sy,sz)=>shape(kind,mat,baseX+c*x+s*z,y,baseZ-s*x+c*z,sx,sy,sz,angle);
+    signalShape('cylinder',m.metal,0,3.75,0,.28,7.5,.28);
+    signalShape('box',m.metal,0,7.4,-6.4,.18,.18,13);
+    for(const offset of [-5.5,-12]){
+      signalShape('box',m.metal,0,6.5,offset,.65,2.2,.9);
+      for(const [state,color,y] of [['red',0xff5148,7.18],['amber',0xffc34d,6.5],['green',0x65efbc,5.82]]){
+        const mat=signalMaterials[state],key=`lamp:${mat.uuid}`;
+        const index=batches.get(key)?.matrices.length||0;
+        signalShape('lamp',mat,-.36,y,offset,1,1,1);
+        signals.push({intersection:tile.id,axis:approach%2===0?'x':'z',state,color,key,index});
       }
-      signals.push({ axis: approach % 2 === 0 ? 'x' : 'z', lamps });
     }
   }
+  } // End tile assembly: every static item shares the same global batches.
   for (const { kind, mat, matrices } of batches.values()) {
     const mesh = new THREE.InstancedMesh(geometry[kind], mat, matrices.length);
     matrices.forEach((matrix, i) => mesh.setMatrixAt(i, matrix));
@@ -56085,23 +56098,23 @@ function createWorld(scene) {
     mesh.castShadow = mat !== m.asphalt && mat !== m.grass && mat !== m.white && mat !== m.yellow;
     mesh.receiveShadow = true;
     mesh.computeBoundingSphere();
-    root.add(mesh);
+    root.add(mesh);batches.get(`${kind}:${mat.uuid}`).mesh=mesh;
   }
+  const lampColor=new THREE.Color();
   function update(time = 0) {
-    const phase = trafficPhase(time);
-    for (const { axis, lamps } of signals) {
-      for (const state of ['red', 'amber', 'green']) {
-        const active = phase[axis] === state;
-        lamps[state].emissiveIntensity = active ? 2.5 : 0;
-        lamps[state].color.setHex(active ? { red: 0xff5148, amber: 0xffc34d, green: 0x65efbc }[state] : 0x263445);
-      }
+    for(const signal of signals){
+      const active=trafficPhase(time,signal.intersection)[signal.axis]===signal.state;
+      batches.get(signal.key).mesh.setColorAt(signal.index,lampColor.setHex(active?signal.color:0x080b10));
     }
+    for(const mat of Object.values(signalMaterials))batches.get(`lamp:${mat.uuid}`).mesh.instanceColor.needsUpdate=true;
   }
   update(0);
-  return { update, groundHeight: (_x, _z) => 0 };
+  return {update,root,intersections:INTERSECTIONS,surfaces,batchCount:batches.size,bounds:{min:-240,max:720},signals,groundHeight:(_x,_z)=>0};
 }
 
 return Object.freeze({
+get ["GRID_SPACING"]() { return GRID_SPACING; },
+get ["INTERSECTIONS"]() { return INTERSECTIONS; },
 get ["trafficPhase"]() { return trafficPhase; },
 get ["createWorld"]() { return createWorld; }
 });
@@ -56111,23 +56124,40 @@ get ["createWorld"]() { return createWorld; }
 __modules[6] = (function(__deps) {
 const THREE = __deps[0];
 const trafficPhase = __deps[1]["trafficPhase"];
+const INTERSECTIONS = __deps[1]["INTERSECTIONS"];
+const GRID_SPACING = __deps[1]["GRID_SPACING"];
 
 
 
 const EXTENT = 238;
-const STOP = EXTENT - 26;
+const STOP_OFFSET = 26;
 
+// Rotate a local west-to-east approach onto a grid row or column.
 // Right-hand traffic: straight cars use the inner lane, right turns the outer.
-function route(approach, turning) {
+function route(approach, turning, origin) {
   const lane = turning ? 9.5 : 3.75;
   const radius = 15 - lane;
   const entryLength = EXTENT - 15;
   const arcLength = radius * Math.PI / 2;
   const angle = approach * Math.PI / 2;
-  const c = Math.cos(angle), s = Math.sin(angle);
+  const c = Math.round(Math.cos(angle)), s = Math.round(Math.sin(angle));
+  const intersectionAt = (x, z) => INTERSECTIONS.find(intersection =>
+    intersection.x === origin.x + c * x + s * z &&
+    intersection.z === origin.z - s * x + c * z).id;
+  const axis = approach % 2 === 0 ? 'x' : 'z';
   return {
-    axis: approach % 2 === 0 ? 'x' : 'z',
-    length: turning ? entryLength * 2 + arcLength : EXTENT * 2,
+    axis,
+    stops: [
+      { distance: EXTENT - STOP_OFFSET, intersection: intersectionAt(0, 0), axis },
+      turning
+        ? { distance: entryLength + arcLength + GRID_SPACING - STOP_OFFSET - 15,
+          intersection: intersectionAt(0, GRID_SPACING), axis: axis === 'x' ? 'z' : 'x' }
+        : { distance: EXTENT + GRID_SPACING - STOP_OFFSET,
+          intersection: intersectionAt(GRID_SPACING, 0), axis }
+    ],
+    turnStart: turning ? entryLength - 18 : Infinity,
+    turnEnd: turning ? entryLength + arcLength + 18 : Infinity,
+    length: turning ? entryLength * 2 + GRID_SPACING + arcLength : EXTENT * 2 + GRID_SPACING,
     sample(distance, position, tangent) {
       let x, z, dx, dz;
       if (!turning || distance <= entryLength) {
@@ -56139,7 +56169,7 @@ function route(approach, turning) {
       } else {
         x = -lane; z = 15 + distance - entryLength - arcLength; dx = 0; dz = 1;
       }
-      position.set(c * x + s * z, 0, -s * x + c * z);
+      position.set(origin.x + c * x + s * z, 0, origin.z - s * x + c * z);
       tangent.set(c * dx + s * dz, 0, -s * dx + c * dz);
     }
   };
@@ -56166,6 +56196,15 @@ class NPCManager {
     const wheelGeometry = new THREE.CylinderGeometry(0.38, 0.38, 0.24, 10);
     const hubGeometry = new THREE.CylinderGeometry(0.22, 0.22, 0.255, 8);
     const colors = [0x719eb4, 0xd9b391, 0xc46d62, 0xd5dfe2, 0x6a8b83, 0xd7ba70];
+    const routes = [
+      route(0, false, { x: 0, z: 0 }),
+      route(2, false, { x: GRID_SPACING, z: GRID_SPACING }),
+      route(1, false, { x: 0, z: GRID_SPACING }),
+      route(3, false, { x: GRID_SPACING, z: 0 }),
+      route(0, true, { x: 0, z: 0 }),
+      route(2, true, { x: GRID_SPACING, z: GRID_SPACING })
+    ];
+    const spawns = [80, 350, 560, 140, 130, 340];
     for (let i = 0; i < 6; i++) {
       const car = new THREE.Group();
       car.name = `City car ${i + 1}`;
@@ -56201,11 +56240,12 @@ class NPCManager {
         pivot.add(wheel, hub); car.add(pivot); wheels.push(pivot);
       }
       const turning = i >= 4;
-      const path = route(turning ? (i === 4 ? 1 : 3) : i, turning);
+      const path = routes[i];
       const state = {
-        mesh: car, route: path, distance: 80 + i * 21,
+        mesh: car, route: path, distance: spawns[i],
         speed: 8 + i * 0.4, cruise: 10 + (i % 3), wheels,
-        brakeMaterial, committed: false, turning, wheelAngle: 0
+        brakeMaterial, committed: false, turning, wheelAngle: 0,
+        nextStop: path.stops.filter(stop => stop.distance < spawns[i]).length
       };
       path.sample(state.distance, car.position, this._tangent);
       car.rotation.y = Math.atan2(this._tangent.x, this._tangent.z);
@@ -56230,18 +56270,19 @@ class NPCManager {
       hasPlayer = Number.isFinite(this._player.x) && Number.isFinite(this._player.z);
     }
     for (let step = 0; step < steps; step++) {
-      const phase = trafficPhase(time - elapsed + (step + 1) * h);
+      const now = time - elapsed + (step + 1) * h;
       for (const car of this.cars) {
         const path = car.route;
-        const remaining = STOP - car.distance;
-        const signal = phase[path.axis];
-        // At amber, a car too close to brake comfortably clears the junction.
-        if (remaining >= 0 && signal === 'amber' && remaining < car.speed * car.speed / 7 + 1) car.committed = true;
-        if (car.distance > STOP + 0.05) car.committed = true;
+        const stop = path.stops[car.nextStop];
+        const remaining = stop ? stop.distance - car.distance : Infinity;
+        const signal = stop ? trafficPhase(now, stop.intersection)[stop.axis] : 'green';
+        // A stationary car must wait for green, not restart on amber.
+        if (remaining >= 0 && signal === 'amber' && car.speed > 0.5 &&
+            remaining < car.speed * car.speed / 7 + 1) car.committed = true;
         let target = car.cruise;
         let stopDistance = Infinity;
         if (!car.committed && signal !== 'green' && remaining >= 0) stopDistance = remaining;
-        if (car.turning && car.distance > 200 && car.distance < 243) target = 5;
+        if (car.distance > path.turnStart && car.distance < path.turnEnd) target = 5;
         path.sample(car.distance, this._position, this._tangent);
         // Lightweight avoidance: following cars and a player ahead in this lane.
         const obstacle = position => {
@@ -56260,8 +56301,14 @@ class NPCManager {
         if (travel >= stopDistance) { travel = stopDistance; car.speed = 0; }
         car.distance += travel;
         car.brakeMaterial.emissiveIntensity = car.speed < oldSpeed - 0.001 || car.speed < 0.2 ? 2.4 : 0.45;
+        // Commitment belongs to one stop only, including after a right turn.
+        while (car.nextStop < path.stops.length && car.distance > path.stops[car.nextStop].distance) {
+          car.nextStop++;
+          car.committed = false;
+        }
         if (car.distance >= path.length) {
           car.distance %= path.length;
+          car.nextStop = 0;
           car.committed = false;
         }
         path.sample(car.distance, car.mesh.position, this._tangent);
@@ -56288,14 +56335,14 @@ const degrees = value => finite(value) * 180 / Math.PI;
 const signed = (value, digits = 1) => `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`;
 
 /** Mount the cockpit. Angles are radians, pressure is Pa, and speeds are m/s. */
-function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {}} = {}) {
-  const settings = {assisted: true, rate: 180, invincible: false, infinite: false};
+function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {}, onRecord = () => {}, onReplay = () => {}, onExitReplay = () => {}} = {}) {
+  const settings = {assisted: true, rate: 180, invincible: false, infinite: false, bulletTime: false};
   const root = document.createElement('div');
   root.id = 'sim-hud';
   root.innerHTML = `
     <header class="sim-header">
       <div class="sim-brand"><span class="sim-eyebrow">EXPERIMENTAL VEHICLE PROGRAM / 01</span><h1>ROADSTER <span>/ ROCKET LAB</span></h1></div>
-      <div class="sim-mission"><span class="sim-status-dot"></span><strong id="sim-mode">GROUND</strong><span id="sim-assist-status">ASSIST READY</span><time id="sim-time">T+ 00:00</time></div>
+      <div class="sim-mission"><span class="sim-status-dot"></span><strong id="sim-mode">GROUND</strong><span id="sim-assist-status">ASSIST READY</span><span id="sim-camera-view">VIEW: 3/4 CHASE</span><span id="sim-record-status" hidden>REC</span><span id="sim-slow-mo" hidden>SLOW-MO 0.5x</span><time id="sim-time">T+ 00:00</time></div>
     </header>
     <div id="sim-pitch-warning" class="sim-pitch-warning" role="alert" aria-live="assertive" hidden></div>
     <aside class="sim-left" aria-label="Vehicle telemetry">
@@ -56341,7 +56388,8 @@ function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {
       <section class="sim-panel sim-controls" aria-label="Flight settings">
         <div class="sim-control-top"><span class="sim-eyebrow">FLIGHT CONTROL</span><div class="sim-mode-selector" role="group" aria-label="Control mode"><button id="sim-assisted" class="sim-selected" type="button" aria-pressed="true">ASSISTED</button><button id="sim-direct" type="button" aria-pressed="false">DIRECT</button></div></div>
         <div class="sim-rate-row"><label for="sim-rate">ATTITUDE RATE</label><input id="sim-rate" type="range" min="90" max="360" step="10" value="180"><output id="sim-rate-value" for="sim-rate">180°/s</output></div>
-        <div class="sim-options"><label><input id="sim-invincible" type="checkbox"><span>Invincible</span></label><label><input id="sim-infinite" type="checkbox"><span>Infinite gas</span></label><button id="sim-refill" type="button">REFILL <span>↗</span></button><button id="sim-reset" type="button">RESET <kbd data-key-action="reset">R</kbd></button></div>
+        <div class="sim-options"><label><input id="sim-invincible" type="checkbox"><span>Invincible</span></label><label><input id="sim-infinite" type="checkbox"><span>Infinite gas</span></label><label><input id="sim-bullet-time" type="checkbox"><span>Bullet Time</span></label><button id="sim-refill" type="button">REFILL <span>↗</span></button><button id="sim-reset" type="button">RESET <kbd data-key-action="reset">R</kbd></button></div>
+        <div class="sim-playback-controls"><button id="sim-record" type="button" aria-pressed="false">● Record</button><button id="sim-replay" type="button" disabled>▶ Play Replay</button><button id="sim-exit-replay" type="button" hidden>Exit Replay / Esc</button><output id="sim-replay-progress" hidden></output></div>
         <button id="sim-keybinds" type="button">KEYBINDS / CUSTOMIZE CONTROLS</button>
       </section>
       <details class="sim-panel sim-help" open>
@@ -56378,13 +56426,16 @@ function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {
     text('rate-value', `${settings.rate}°/s`);
     publish();
   });
-  for (const id of ['invincible', 'infinite']) {
-    listen($(id), 'change', event => { settings[id] = event.target.checked; publish(); });
+  for (const [id,key] of [['invincible','invincible'],['infinite','infinite'],['bullet-time','bulletTime']]) {
+    listen($(id), 'change', event => { settings[key] = event.target.checked; publish(); });
   }
   const dismissLanding = () => { clearTimeout(landingTimer); nodes.landing.hidden = true; };
   listen($('landing-close'), 'click', dismissLanding);
   listen($('reset'), 'click', () => { dismissLanding(); onReset(); });
   listen($('refill'), 'click', () => onRefill());
+  listen($('record'), 'click', () => onRecord());
+  listen($('replay'), 'click', () => onReplay());
+  listen($('exit-replay'), 'click', () => onExitReplay());
   // Keep cockpit keyboard interactions from also commanding the vehicle.
   for (const type of ['keydown', 'keyup']) listen(root, type, event => {
     if (event.target.matches('input, button, summary')) event.stopPropagation();
@@ -56399,7 +56450,18 @@ function createUI({onReset = () => {}, onRefill = () => {}, onSettings = () => {
     const crashed = Boolean(state.crashed);
     root.classList.toggle('sim-crashed', crashed);
     root.classList.toggle('sim-low-gas', pressure < 5);
-    text('mode', crashed ? 'CRASHED' : state.mode === 'FLIGHT' ? 'FLIGHT' : 'GROUND');
+    text('camera-view', `VIEW: ${state.cameraView || '3/4 CHASE'}`);
+    nodes['slow-mo'].hidden = !state.slowMo;
+    text('record-status', state.replaying ? 'REPLAYING' : `● REC ${Math.max(0,finite(state.recordSeconds)).toFixed(1)}s`);
+    nodes['record-status'].hidden = !state.recording && !state.replaying;
+    nodes.record.disabled = Boolean(state.replaying);
+    nodes.record.setAttribute('aria-pressed',String(Boolean(state.recording)));
+    text('record', state.recording ? '■ Stop Recording' : '● Record');
+    nodes.replay.disabled = !state.replayReady || Boolean(state.replaying) || Boolean(state.recording);
+    nodes['exit-replay'].hidden = !state.replaying;
+    nodes['replay-progress'].hidden = !state.replaying;
+    text('replay-progress', `${Math.round(clamp(finite(state.replayProgress),0,1)*100)}%`);
+    text('mode', state.replaying ? 'REPLAYING' : crashed ? 'CRASHED' : state.mode === 'FLIGHT' ? 'FLIGHT' : 'GROUND');
     text('assist-status', settings.assisted ? (state.controlMode === 'LANDING' && state.mode === 'FLIGHT' ? 'LANDING ASSIST' : state.assistActive ? 'ASSIST ACTIVE' : 'ASSIST READY') : 'DIRECT CONTROL');
     nodes['pitch-warning'].hidden = !state.pitchLocked || state.mode !== 'FLIGHT';
     text('pitch-warning', `RELEASE [${state.pitchLockKeys || 'PITCH KEY'}] TO ENGAGE PITCH`);
@@ -57114,8 +57176,218 @@ get ["TakeoffPitchLock"]() { return TakeoffPitchLock; }
 });
 })([]);
 
-// simulator.js
+// camera-rig.js
 __modules[13] = (function(__deps) {
+const THREE = __deps[0];
+
+
+const CAMERA_VIEWS=Object.freeze(['3/4 CHASE','DIRECT CHASE','TOP-DOWN','ORBIT']);
+const clamp=THREE.MathUtils.clamp;
+/** Lightweight follow-orbit, no controls dependency. DOM binding is optional. */
+// Render-only interpolation; never writes back into the physics body.
+class RenderPose {
+  constructor(body){this.previousP=new THREE.Vector3();this.previousQ=new THREE.Quaternion();this.p=new THREE.Vector3();this.q=new THREE.Quaternion();this.reset(body);}
+  reset(body){this.capture(body);this.p.copy(body.p);this.q.copy(body.q);}
+  capture(body){this.previousP.copy(body.p);this.previousQ.copy(body.q);}
+  sample(body,alpha){const t=clamp(alpha,0,1);this.p.lerpVectors(this.previousP,body.p,t);this.q.copy(this.previousQ).slerp(body.q,t);return this;}
+}
+
+class CameraRig {
+  constructor(camera,element=null){
+    this.camera=camera;this.mode=0;this.theta=0;this.phi=1.1;this.radius=12;
+    this.lastBodyP=new THREE.Vector3();this.bodyReady=false;
+    this.heading=0;this.headingReady=false;this.followOffset=new THREE.Vector3();this.followReady=false;
+    this.target=new THREE.Vector3();this.desired=new THREE.Vector3();this.pointers=new Map();this.listeners=[];
+    if(element)this.bind(element);
+  }
+  get name(){return CAMERA_VIEWS[this.mode];}
+  cycle(){this.setMode((this.mode+1)%4);return this.mode;}
+  setMode(mode){
+    if(!Number.isInteger(mode)||mode<0||mode>3)return false;
+    if(mode===3&&this.mode!==3){
+      const offset=this.camera.position.clone().sub(this.target);
+      if(offset.lengthSq()>.001){this.radius=clamp(offset.length(),3,35);this.phi=clamp(Math.acos(clamp(offset.y/offset.length(),-1,1)),.1,Math.PI/2-.04);this.theta=Math.atan2(offset.z,offset.x);}
+    }
+    this.transitioning=mode!==this.mode;this.transitionElapsed=0;this.mode=mode;this.pointers.clear();return true;
+  }
+  rebase(body){this.lastBodyP.copy(body.p);this.bodyReady=true;this.transitioning=true;this.transitionElapsed=0;}
+  rotate(dx,dy){if(this.mode!==3)return;this.theta-=dx*.006;this.phi=clamp(this.phi+dy*.006,.1,Math.PI/2-.04);}
+  zoom(factor){if(this.mode===3&&Number.isFinite(factor)&&factor>0)this.radius=clamp(this.radius*factor,3,35);}
+  update(dt,body,snap=false){
+    // During a view transition carry the camera with vehicle translation first,
+    // so moving targets converge instead of sustaining a world-space lag.
+    if(this.transitioning&&!snap&&this.bodyReady)this.camera.position.add(body.p.clone().sub(this.lastBodyP));
+    this.lastBodyP.copy(body.p);this.bodyReady=true;
+    const front=new THREE.Vector3(1,0,0).applyQuaternion(body.q);front.y=0;
+    const blend=snap?1:1-Math.exp(-Math.max(0,dt)*5);
+    if(this.transitioning&&!snap)this.transitionElapsed=(this.transitionElapsed||0)+Math.max(0,dt);
+    // Retain heading near vertical: resetting to +X there causes 180° jumps.
+    if(front.lengthSq()>=.02){
+      const heading=Math.atan2(front.z,front.x);
+      if(snap||!this.headingReady)this.heading=heading;
+      else this.heading+=Math.atan2(Math.sin(heading-this.heading),Math.cos(heading-this.heading))*blend;
+      this.headingReady=true;
+    }
+    front.set(Math.cos(this.heading),0,Math.sin(this.heading));
+    const side=new THREE.Vector3().crossVectors(front,new THREE.Vector3(0,1,0));
+    this.target.copy(body.p).add(new THREE.Vector3(0,.7,0));
+    if(this.mode===3){
+      this.desired.set(Math.sin(this.phi)*Math.cos(this.theta),Math.cos(this.phi),Math.sin(this.phi)*Math.sin(this.theta)).multiplyScalar(this.radius).add(this.target);
+      // Position and look target follow together: orbit never trails the car.
+      if(this.transitioning&&!snap)this.camera.position.lerp(this.desired,blend);
+      else this.camera.position.copy(this.desired);
+    }else{
+      this.target.addScaledVector(front,2.3);
+      if(this.mode===0)this.desired.copy(body.p).addScaledVector(front,-10.5).addScaledVector(side,5.4).add(new THREE.Vector3(0,4.5,0));
+      else if(this.mode===1)this.desired.copy(body.p).addScaledVector(front,-13).add(new THREE.Vector3(0,6,0));
+      else this.desired.copy(body.p).add(new THREE.Vector3(-.01,32,.01));
+      this.desired.y=Math.max(1.3,this.desired.y);
+      if(this.transitioning&&!snap)this.camera.position.lerp(this.desired,blend);
+      else {
+        // Damp the relative boom, not world translation against an instant
+        // look target. Both ends now share the same interpolated vehicle pose.
+        const offset=this.desired.clone().sub(body.p);
+        if(snap||!this.followReady)this.followOffset.copy(offset);
+        else this.followOffset.lerp(offset,blend);
+        this.followReady=true;this.camera.position.copy(body.p).add(this.followOffset);
+      }
+    }
+    this.camera.up.set(0,1,0);
+    const previous=this.camera.quaternion.clone();
+    this.camera.lookAt(this.target);
+    if(this.transitioning&&!snap){
+      const goal=this.camera.quaternion.clone();
+      this.camera.quaternion.copy(previous).slerp(goal,blend);
+      if(this.transitionElapsed>=1.5||(this.camera.position.distanceTo(this.desired)<.01&&this.camera.quaternion.angleTo(goal)<.001)){this.transitioning=false;this.followOffset.copy(this.camera.position).sub(body.p);this.followReady=true;}
+    }else this.transitioning=false;
+  }
+  bind(element){
+    const on=(event,handler,options)=>{element.addEventListener(event,handler,options);this.listeners.push(()=>element.removeEventListener(event,handler,options));};
+    on('pointerdown',event=>{
+      if(this.mode!==3||(event.pointerType==='mouse'&&event.button!==0))return;
+      this.pointers.set(event.pointerId,{x:event.clientX,y:event.clientY});element.setPointerCapture?.(event.pointerId);event.preventDefault();
+    });
+    on('pointermove',event=>{
+      if(this.mode!==3||!this.pointers.has(event.pointerId))return;
+      const old=this.pointers.get(event.pointerId),next={x:event.clientX,y:event.clientY};
+      const other=[...this.pointers.entries()].find(([id])=>id!==event.pointerId)?.[1];
+      if(other){
+        const before=Math.hypot(old.x-other.x,old.y-other.y),after=Math.hypot(next.x-other.x,next.y-other.y);
+        if(after>1&&before>1)this.zoom(before/after);
+      }else this.rotate(next.x-old.x,next.y-old.y);
+      this.pointers.set(event.pointerId,next);event.preventDefault();
+    });
+    const release=event=>{this.pointers.delete(event.pointerId);};
+    for(const event of ['pointerup','pointercancel','lostpointercapture'])on(event,release);
+    on('wheel',event=>{if(this.mode!==3)return;event.preventDefault();this.zoom(Math.exp(clamp(event.deltaY,-500,500)*.0015));},{passive:false});
+  }
+  dispose(){this.listeners.forEach(remove=>remove());this.listeners=[];this.pointers.clear();}
+}
+
+return Object.freeze({
+get ["CAMERA_VIEWS"]() { return CAMERA_VIEWS; },
+get ["RenderPose"]() { return RenderPose; },
+get ["CameraRig"]() { return CameraRig; }
+});
+})([__modules[0]]);
+
+// time-scale.js
+__modules[14] = (function(__deps) {
+
+/** Use real contacts during the .15 s flight hysteresis, not just mode labels. */
+function simulationTimeScale(body,settings={}) {
+  if(!settings.bulletTime)return 1;
+  const airborne=body.mode==='FLIGHT'||body.grounded===false||
+    (Array.isArray(body.wheels)&&body.wheels.length>0&&body.wheels.every(wheel=>!wheel.contact));
+  return airborne?.5:1;
+}
+
+return Object.freeze({
+get ["simulationTimeScale"]() { return simulationTimeScale; }
+});
+})([]);
+
+// playback.js
+__modules[15] = (function(__deps) {
+const Quaternion = __deps[0]["Quaternion"];
+
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+function capture(body,t){
+  return {t,pos:body.p.toArray(),rot:body.q.toArray(),velocity:body.v.toArray(),omega:body.omega.toArray(),
+    steer:body.steer,throttles:Array.from(body.throttles),mode:body.mode,
+    wheels:body.wheels.map(w=>({steer:w.steer,spin:w.spin,length:w.length,contact:w.contact,force:w.force,compression:w.compression})),
+    gas:body.gas,pressure:body.pressure,g:body.g,altitude:body.altitude,slip:body.slip,thrust:body.thrust,crashed:body.crashed};
+}
+function apply(body,frame){
+  body.p.fromArray(frame.pos);body.q.fromArray(frame.rot);body.v.fromArray(frame.velocity);body.omega.fromArray(frame.omega);
+  body.throttles.set(frame.throttles);
+  for(const key of ['steer','mode','gas','pressure','g','altitude','slip','thrust','crashed'])body[key]=frame[key];
+  body.wheels.forEach((w,i)=>Object.assign(w,frame.wheels[i]));
+}
+/** Bounded 30 Hz flight recorder. Timeline uses simulation time; replay uses wall time.
+ * A new recording replaces the old take; reset stops recording and enables playback.
+ * During playback caller must skip physics, and advance() applies visual telemetry.
+ */
+class Playback {
+  constructor({sampleRate=30,maxSeconds=120}={}){
+    if(!Number.isFinite(sampleRate)||sampleRate<=0||!Number.isFinite(maxSeconds)||maxSeconds<=0)throw new RangeError('Invalid recorder limits');
+    this.interval=1/sampleRate;this.maxSeconds=maxSeconds;this.maxFrames=Math.floor(sampleRate*maxSeconds)+1;
+    this.frames=[];this.recording=false;this.playing=false;this.ready=false;this.elapsed=0;this.cursor=0;
+  }
+  get duration(){return this.frames.at(-1)?.t||0;}
+  get progress(){return this.duration?Math.min(1,this.cursor/this.duration):0;}
+  startRecording(body){
+    if(this.playing)return false;
+    this.frames=[capture(body,0)];this.elapsed=0;this.nextSample=this.interval;this.recording=true;this.ready=false;return true;
+  }
+  stopRecording(body){
+    if(!this.recording)return;
+    if(body&&this.elapsed>this.duration+1e-8&&this.frames.length<this.maxFrames)this.frames.push(capture(body,Math.min(this.elapsed,this.maxSeconds)));
+    this.recording=false;
+  }
+  record(dt,body){
+    if(!this.recording||!Number.isFinite(dt)||dt<=0)return;
+    this.elapsed=Math.min(this.maxSeconds,this.elapsed+dt);
+    if(this.elapsed+1e-8>=this.nextSample&&this.frames.length<this.maxFrames){
+      this.frames.push(capture(body,this.elapsed));this.nextSample=this.elapsed+this.interval;
+    }
+    if(this.elapsed>=this.maxSeconds||this.frames.length>=this.maxFrames)this.stopRecording(body);
+  }
+  onReset(body){this.stopRecording(body);this.ready=this.frames.length>1&&this.duration>0;}
+  start(body){
+    if(this.playing||!this.ready||this.frames.length<2)return false;
+    this.saved=capture(body,0);this.playing=true;this.cursor=0;this.index=0;apply(body,this.frames[0]);return true;
+  }
+  sample(t){
+    if(!this.frames.length)return null;
+    const time=Math.max(0,Math.min(this.duration,Number.isFinite(t)?t:0));
+    let low=0,high=this.frames.length-1;
+    while(low+1<high){const mid=(low+high)>>1;if(this.frames[mid].t<=time)low=mid;else high=mid;}
+    const a=this.frames[low],b=this.frames[high],alpha=b.t>a.t?(time-a.t)/(b.t-a.t):0;
+    const result={...a,t:time};
+    for(const key of ['pos','velocity','omega','throttles'])result[key]=a[key].map((value,i)=>lerp(value,b[key][i],alpha));
+    result.rot=new Quaternion().fromArray(a.rot).slerp(new Quaternion().fromArray(b.rot),alpha).normalize().toArray();
+    for(const key of ['steer','gas','pressure','g','altitude','slip','thrust'])result[key]=lerp(a[key],b[key],alpha);
+    result.wheels=a.wheels.map((w,i)=>({...w,steer:lerp(w.steer,b.wheels[i].steer,alpha),spin:lerp(w.spin,b.wheels[i].spin,alpha),length:lerp(w.length,b.wheels[i].length,alpha)}));
+    if(alpha===1){result.mode=b.mode;result.crashed=b.crashed;}
+    return result;
+  }
+  advance(dt,body){
+    if(!this.playing)return false;
+    if(Number.isFinite(dt)&&dt>0)this.cursor=Math.min(this.duration,this.cursor+dt);
+    apply(body,this.sample(this.cursor));return this.cursor>=this.duration;
+  }
+  exit(body){if(!this.playing)return false;apply(body,this.saved);this.saved=null;this.playing=false;return true;}
+}
+
+return Object.freeze({
+get ["Playback"]() { return Playback; }
+});
+})([__modules[0]]);
+
+// simulator.js
+__modules[16] = (function(__deps) {
 const THREE = __deps[0];
 const createRoadster = __deps[1]["createRoadster"];
 const VehiclePhysics = __deps[2]["VehiclePhysics"];
@@ -57131,6 +57403,13 @@ const ACTIONS = __deps[9]["ACTIONS"];
 const formatKey = __deps[9]["formatKey"];
 const createKeybindPanel = __deps[10]["createKeybindPanel"];
 const TakeoffPitchLock = __deps[11]["TakeoffPitchLock"];
+const CameraRig = __deps[12]["CameraRig"];
+const RenderPose = __deps[12]["RenderPose"];
+const simulationTimeScale = __deps[13]["simulationTimeScale"];
+const Playback = __deps[14]["Playback"];
+
+
+
 
 
 
@@ -57160,31 +57439,42 @@ renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.
 host.appendChild(renderer.domElement);
 const world=createWorld(scene),npcs=new NPCManager(scene),body=new VehiclePhysics(),controller=new FlightController();
 const model=createRoadster();scene.add(model.car);
-const effects=new VehicleEffects(scene,model),audio=new AudioSystem();
-let settings={assisted:true,rate:180,invincible:false,infinite:false},time=0,cameraMode=0;
+const effects=new VehicleEffects(scene,model),audio=new AudioSystem(),playback=new Playback();
+let settings={assisted:true,rate:180,invincible:false,infinite:false,bulletTime:false},time=0;
 const keys=new Set(),physicalKeys=new Set(),pitchLock=new TakeoffPitchLock();
 // Physical release state survives focus/modal clearing of active driving keys.
 window.addEventListener('keydown',event=>{if(!event.repeat)physicalKeys.add(event.code);},true);
 let accumulator=0,last=performance.now(),frame=0;
-const cameraTarget=new THREE.Vector3(),cameraDesired=new THREE.Vector3();
-function reset(){body.reset();controller.reset();pitchLock.reset();effects.reset();keys.clear();accumulator=0;ui.dismissLanding();syncModel();updateCamera(1,true);host.focus({preventScroll:true});}
-const ui=createUI({onReset:reset,onRefill:()=>body.refill(),onSettings:value=>{settings=value;if(settings.infinite)body.refill();controller.reset();}});
+const cameraRig=new CameraRig(camera,renderer.domElement),renderPose=new RenderPose(body);
+function reset(){playback.exit(body);playback.onReset(body);body.reset();renderPose.reset(body);controller.reset();pitchLock.reset();effects.reset();keys.clear();accumulator=0;ui.dismissLanding();syncModel();updateCamera(1,true);host.focus({preventScroll:true});}
+function exitReplay(){playback.exit(body);renderPose.reset(body);cameraRig.rebase(renderPose);keys.clear();accumulator=0;effects.reset();controller.reset();pitchLock.reset();host.focus({preventScroll:true});ui.update(telemetry());}
+const ui=createUI({onReset:reset,onRefill:()=>{if(!playback.playing)body.refill();},
+  onRecord:()=>{if(playback.recording)playback.stopRecording(body);else playback.startRecording(body);host.focus({preventScroll:true});ui.update(telemetry());},
+  onReplay:()=>{if(playback.start(body)){keys.clear();accumulator=0;effects.reset();host.focus({preventScroll:true});ui.update(telemetry());}},onExitReplay:exitReplay,
+  onSettings:value=>{settings=value;if(settings.infinite&&!playback.playing)body.refill();controller.reset();}});
 const keybinds=new Keybinds();
 let bindingsActive=false;
 const keybindPanel=createKeybindPanel(keybinds,{onActive:value=>{bindingsActive=value;keys.clear();controller.reset();},onClose:()=>{keys.clear();host.focus({preventScroll:true});}});
 document.querySelector('#sim-keybinds').addEventListener('click',()=>keybindPanel.open());
 keybinds.subscribe(()=>keys.clear());
 const input=()=>{
-  const activeKeys=bindingsActive?new Set():keys;
+  const activeKeys=bindingsActive||playback.playing?new Set():keys;
   pitchLock.update(body.mode,physicalKeys,keybinds);
   return pitchLock.filter(keybinds.input(activeKeys,body.mode),body.mode);
 };
 const telemetry=()=>({...body.snapshot(),assistActive:controller.assistActive,controlMode:controller.mode,
-  pitchLocked:pitchLock.locked,pitchLockKeys:[...pitchLock.blocked].map(formatKey).join(' / '),time});
+  pitchLocked:pitchLock.locked,pitchLockKeys:[...pitchLock.blocked].map(formatKey).join(' / '),cameraView:cameraRig.name,
+  slowMo:!playback.playing&&simulationTimeScale(body,settings)===.5,recording:playback.recording,
+  recordSeconds:playback.duration,replayReady:playback.ready,replaying:playback.playing,replayProgress:playback.progress,time});
 const isControl=code=>ACTIONS.some(action=>keybinds.matches(action.id,code));
 const drivingTarget=target=>!target?.closest?.('#sim-hud, input, select, textarea, button, summary, a, [contenteditable]:not([contenteditable="false"])');
 window.addEventListener('keydown',event=>{
   if(bindingsActive||!drivingTarget(event.target))return;
+  if(playback.playing){
+    if(!event.repeat&&keybinds.matches('camera',event.code))cameraRig.cycle();
+    if(!event.repeat&&keybinds.matches('reset',event.code))reset();
+    return;
+  }
   if(isControl(event.code)){
     event.preventDefault();
     // Focus/modal suppression requires a fresh press, not an OS auto-repeat.
@@ -57192,20 +57482,20 @@ window.addEventListener('keydown',event=>{
     audio.unlock();
   }
   if(!event.repeat&&keybinds.matches('reset',event.code))reset();
-  if(!event.repeat&&keybinds.matches('camera',event.code)){cameraMode=(cameraMode+1)%3;updateCamera(1,true);}
+  if(!event.repeat&&keybinds.matches('camera',event.code)){cameraRig.cycle();ui.update(telemetry());}
 });
 // Capture releases before a cockpit widget can stop bubbling.
 window.addEventListener('keyup',event=>{keys.delete(event.code);physicalKeys.delete(event.code);pitchLock.update(body.mode,physicalKeys,keybinds);ui.update(telemetry());if(isControl(event.code)&&!bindingsActive&&drivingTarget(event.target))event.preventDefault();},true);
 window.addEventListener('focusin',event=>{if(event.target.closest?.('#sim-hud'))keys.clear();});
-window.addEventListener('keydown',event=>{if(event.code==='Escape'&&!bindingsActive){keys.clear();host.focus({preventScroll:true});event.preventDefault();}},true);
+window.addEventListener('keydown',event=>{if(event.code==='Escape'&&!bindingsActive){if(playback.playing)exitReplay();keys.clear();host.focus({preventScroll:true});event.preventDefault();}},true);
 host.addEventListener('pointerdown',()=>host.focus({preventScroll:true}));
 window.addEventListener('pointerdown',()=>audio.unlock());
 window.addEventListener('blur',()=>keys.clear());
-document.addEventListener('visibilitychange',()=>{keys.clear();accumulator=0;last=performance.now();});
+document.addEventListener('visibilitychange',()=>{keys.clear();accumulator=0;renderPose.reset(body);last=performance.now();});
 window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
 function syncModel(){
-  model.car.quaternion.copy(body.q);
-  model.car.position.copy(body.p).sub(body.comLocal.clone().applyQuaternion(body.q));
+  model.car.quaternion.copy(renderPose.q);
+  model.car.position.copy(renderPose.p).sub(body.comLocal.clone().applyQuaternion(renderPose.q));
   model.layers.wheels.children.forEach((wheel,i)=>{
     const w=body.wheels[i];wheel.position.y=.80-w.length;
     // model wheel's local axle is Z. Steering rotates +Y, spin +Z.
@@ -57214,43 +57504,42 @@ function syncModel(){
   });
   model.materials.body.color.setHex(body.crashed?0xa9635d:0xe4e9e9);
 }
-function updateCamera(dt,snap=false){
-  // Chase follows horizontal heading, never a tumbling body-up vector.
-  const front=new THREE.Vector3(1,0,0).applyQuaternion(body.q);front.y=0;
-  if(front.lengthSq()<.02)front.set(1,0,0);front.normalize();
-  const side=new THREE.Vector3().crossVectors(front,new THREE.Vector3(0,1,0));
-  cameraTarget.copy(body.p).add(new THREE.Vector3(0,.7,0)).addScaledVector(front,2.3);
-  if(cameraMode===0)cameraDesired.copy(body.p).addScaledVector(front,-10.5).addScaledVector(side,5.4).add(new THREE.Vector3(0,4.5,0));
-  else if(cameraMode===1)cameraDesired.copy(body.p).addScaledVector(front,-13).add(new THREE.Vector3(0,6,0));
-  else cameraDesired.copy(body.p).add(new THREE.Vector3(-.01,32,.01));
-  cameraDesired.y=Math.max(1.3,cameraDesired.y);
-  camera.position.lerp(cameraDesired,snap?1:1-Math.exp(-dt*5));camera.up.set(0,1,0);camera.lookAt(cameraTarget);
-}
+function updateCamera(dt,snap=false){cameraRig.update(dt,renderPose,snap);}
 function animate(now){
   requestAnimationFrame(animate);
   const dt=Math.min(.1,Math.max(0,(now-last)/1000));last=now;
   if(document.hidden)return;
-  accumulator+=dt;
+  if(playback.playing){
+    const ended=playback.advance(dt,body);renderPose.reset(body);syncModel();world.update(time);effects.update(dt,body);updateCamera(dt);
+    audio.update({speed:body.v.length(),thrust:body.thrust,slip:body.slip});
+    ui.update(telemetry());renderer.render(scene,camera);frame++;
+    if(ended)exitReplay();
+    return;
+  }
+  accumulator+=dt; // Wall-clock accumulator; each tick consumes real time.
   while(accumulator>=STEP){
-    const controls=input(),throttles=controller.update(STEP,body,controls,settings);
-    body.step(STEP,controls,throttles,settings);
-    pitchLock.update(body.mode,physicalKeys,keybinds);time+=STEP;
-    npcs.update(STEP,time,body);accumulator-=STEP;
+    const effectiveStep=STEP*simulationTimeScale(body,settings);
+    const controls=input(),throttles=controller.update(effectiveStep,body,controls,settings);
+    renderPose.capture(body);
+    body.step(effectiveStep,controls,throttles,settings);playback.record(effectiveStep,body);
+    pitchLock.update(body.mode,physicalKeys,keybinds);time+=effectiveStep;
+    npcs.update(effectiveStep,time,body);accumulator-=STEP;
     while(body.events.length){const event=body.events.shift();ui.landing(event);audio.impact(Math.min(1,event.g/8));}
   }
-  syncModel();world.update(time);effects.update(dt,body);updateCamera(dt);
+  renderPose.sample(body,accumulator/STEP);
+  syncModel();world.update(time);effects.update(dt*simulationTimeScale(body,settings),body);updateCamera(dt);
   audio.update({speed:body.v.length(),thrust:body.thrust,slip:body.slip});
   if(frame++%2===0)ui.update(telemetry());
   renderer.render(scene,camera);
 }
 syncModel();updateCamera(1,true);ui.update({...body.snapshot(),time});
 // A small explicit diagnostic surface enables repeatable integration testing.
-window.rocketLab={body,controller,scene,model,npcs,world,audio,ui,reset,input,keys,physicalKeys,keybinds,keybindPanel,pitchLock,get settings(){return {...settings};},get time(){return time;},get frame(){return frame;}};
+window.rocketLab={body,controller,scene,model,npcs,world,audio,ui,reset,input,keys,physicalKeys,keybinds,keybindPanel,pitchLock,cameraRig,renderPose,playback,exitReplay,get settings(){return {...settings};},get time(){return time;},get frame(){return frame;}};
 requestAnimationFrame(animate);
 
 return Object.freeze({
 
 });
-})([__modules[0],__modules[2],__modules[4],__modules[3],__modules[5],__modules[6],__modules[7],__modules[8],__modules[9],__modules[10],__modules[11],__modules[12]]);
+})([__modules[0],__modules[2],__modules[4],__modules[3],__modules[5],__modules[6],__modules[7],__modules[8],__modules[9],__modules[10],__modules[11],__modules[12],__modules[13],__modules[14],__modules[15]]);
 })();
 </script></body></html>

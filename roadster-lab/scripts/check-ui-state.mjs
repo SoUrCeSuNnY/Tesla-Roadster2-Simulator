@@ -6,7 +6,7 @@ class Element{
  constructor(){this.dataset={};this.style={};this.attributes={};this.children=[];this.hidden=false;this.className='';this.innerHTML='';this.textContent='';all.push(this);this.classList={toggle:(name,on)=>{const s=new Set(this.className.split(' ').filter(Boolean));on?s.add(name):s.delete(name);this.className=[...s].join(' ');}};}
  setAttribute(k,v){this.attributes[k]=v;}appendChild(e){this.children.push(e);return e;}addEventListener(k,v){this['on'+k]=v;}getContext(){return null;}click(){this.clicked=true;}cloneNode(){const e=new Element();e.dataset={...this.dataset};e.className=this.className;e.textContent=this.textContent;return e;}
 }
-const ids={};const html=await fs.readFile('dist/viewer.html','utf8');for(const m of html.matchAll(/id="([^"]+)"/g))ids[m[1]]=new Element();
+const ids={};const html=await fs.readFile(new URL('../dist/viewer.html',import.meta.url),'utf8');for(const m of html.matchAll(/id="([^"]+)"/g))ids[m[1]]=new Element();
 for(const mode of ['exterior','xray','exploded']){const b=new Element();b.dataset.mode=mode;}
 for(const view of ['front','rear','top','bottom']){const b=new Element();b.dataset.camera=view;}
 globalThis.document={querySelector:s=>ids[s.slice(1)],querySelectorAll:s=>{const field={'[data-nozzle]':'nozzle','[data-mode]':'mode','[data-camera]':'camera'}[s];return all.filter(e=>e.dataset[field]);},createElement:()=>new Element(),createElementNS:()=>new Element()};

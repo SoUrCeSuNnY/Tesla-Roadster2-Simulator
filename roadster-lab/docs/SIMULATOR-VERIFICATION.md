@@ -1,23 +1,32 @@
-# 模拟器集成验证记录
+# v0.1 模拟器集成验证记录
 
 ## 当前结果
 
-- `node --test scripts/test-simulator.mjs`：**112 passed，0 failed，0 skipped**。
+- `node --test scripts/test-simulator.mjs`：**148 passed，0 failed，0 skipped**。
 - `node scripts/check-ui-state.mjs`：**PASS**。该测试读取 `dist/viewer.html`，覆盖原查看器的 DOM 状态、模式、展开滑块、喷口说明、GLB 导出与无 WebGL 回退；不把 DOM mock 当作真实渲染证明。
 - `npm run check`：**PASS**。6746 三角形、283 网格、10 喷口、6 张资料图片；GLB 522356 bytes、270 导出节点。
 - `python3 scripts/test-browser.py`：真实无头 Chromium **66 项检查通过**；模拟器与查看器均无 JavaScript `pageerror`。使用软件 WebGL 参数 `--enable-unsafe-swiftshader`，不是特定 GPU 的性能验证。
 
 ## 单文件分发构建验证
 
-- `npm run build`：**PASS**；14模块，`dist/roadster-rocket-standalone.html` **1,461,810 bytes**。Three.js、MIT许可、CSS与模拟器内联，无外部模块加载。
-- `node --test scripts/test-single-html.mjs scripts/test-simulator.mjs`：**129/129 passed**（17项构建＋原112项）。验证确定性、脚本编译、完整模块／CSS／许可、路径独立执行、非法模块语法／循环／越界引用拒绝，以及HTML／模块／CSS／许可直写与符号链接覆写保护。
-- `python3 scripts/test-standalone.py`：真实Chromium **16/16 passed**。只复制生成HTML到含空格／Unicode的隔离临时目录，使用 `file://` 与离线浏览器上下文；**HTTP请求0、其他资源请求0、请求失败0、pageerror0**。覆盖WebGL渲染、驾驶、喷流耗气、重置、改键、轴反转、实际起飞保护、LANDING和音频解锁。Reviewer独立运行同一16项检查通过。
+- `npm run build`：**PASS**；17模块，`dist/roadster-rocket-standalone.html` **1,480,037 bytes**。Three.js、MIT许可、CSS与模拟器内联，无外部模块加载。
+- `node --test scripts/test-single-html.mjs scripts/test-simulator.mjs`：**165/165 passed**（17项构建＋148项模拟器测试）。验证确定性、脚本编译、完整模块／CSS／许可、路径独立执行、非法模块语法／循环／越界引用拒绝，以及HTML／模块／CSS／许可直写与符号链接覆写保护。
+- `python3 scripts/test-standalone.py`：真实Chromium **26/26 passed**。只复制生成HTML到含空格／Unicode的隔离临时目录，使用 `file://` 与离线浏览器上下文；**HTTP请求0、其他资源请求0、请求失败0、pageerror0**。覆盖WebGL渲染、驾驶、喷流耗气、重置、改键、轴反转、实际起飞保护、LANDING和音频解锁。覆盖新增Orbit拖拽滚轮／驾驶、子弹时间空地切换、2×2网格状态、真实录制／reset回放／Esc退出与自然结束。前轮Reviewer曾独立运行旧16项；本轮26项由集成方完整执行。
 - Reviewer首轮发现输出路径可能覆写Three许可或通过符号链接覆写输入，已改为canonical realpath比较并补测试；针对性复审 **Approve for commit**，17项构建回归独立通过。
 - 构建器为本项目约束语法设计，不是通用ESM转换器；不保证hard-link别名／恶意并发文件系统修改防护。离线浏览器配置持久化受各浏览器file-origin政策影响，已有异常回退。跨浏览器／真实GPU仍未验收。
 
+## v0.1 新增与相机抖动回归
+
+- 飞行Yaw改为D负Y／A正Y，地面物理未动，轴反转继续生效。
+- LANDING下降目标 `clamp(1.5+.4375h,1.5,5)`、闭环 `g/up+3(v_d-v_d*)`，慢下降主动减推；9个无约束落地场景无近地hover。h=0目标1.5，不保证实际触地精确值。
+- Orbit四视角、鼠标／触控与3–35m缩放；空中BulletTime=.5x；Playback30Hz／120s有界录制、reset就绪、插值回放／退出；四路口／25批城市与6NPC多路口信号巡航。
+- 相机抖动修复：模型与相机共享RenderPose插值；追踪平滑相对boom而非世界坐标，heading最短弧／近垂直保留；显式rebase区分回放瞬移，移动视角切换同步车位移，visibility丢弃累计时间时同步历史。
+- 数值回归覆盖144Hz恒速插值、20m/s@144Hz与60m/s@10Hz视角切换收敛、4m／100m回放退出连续性、±pi／垂直heading和visibility无倒退。额外真实Chromium检查17帧：model COM与camera输入同一RenderPose，误差0，相对boom X变化范围0，无pageerror。
+- v0.1完整HTTP Chromium回归66项PASS；软件渲染用0.25像素比／关闭阴影且保留真实WebGL、原CSS视口；点击为命中测试后的真实鼠标事件。曾有210s超时，最终300s边界内全量通过，不依赖超时子任务结果。
+
 ## 最终复审
 
-**APPROVED**：本轮 LANDING／起飞保护／三轴反转已完成最终复审。Reviewer 首轮发现焦点清键可绕过物理松键保护，现使用独立 physicalKeys 跟踪并阻止清键后的 auto-repeat 复活；复审无剩余阻塞项。Reviewer 独立重跑 **112/112** 单测通过。集成方完整 Chromium **66 项检查全部通过**（含真实 W/I/K 起飞、动态警告、焦点repeat防绕过、LANDING实际帧、三轴反转持久化和移动视口）。
+**APPROVE — v0.1 release / commit**：Reviewer 全量审查飞控、相机抖动修复、慢动作、回放、地图／NPC、UI与构建产物，未发现阻塞项；独立重跑 **165/165**（148模拟器＋17构建）、资产检查、根目录DOM检查与diff空白检查均通过。集成方HTTP Chromium **66项PASS**，离线Chromium **26项PASS**；Reviewer未重复慢浏览器套件。此前相机回归发现的移动目标永不收敛、短回放瞬移／高速低帧率、visibility历史倒退均已修正并补回归。
 
 ## 针对性修复与回归范围
 
@@ -26,7 +35,7 @@
 3. **查看器入口**：DOM 冒烟测试使用 `viewer.html`；真实 Chromium 也加载该入口并切换透视模式。
 4. **重置报告与状态**：数值测试覆盖真实待定／已报告的正常着陆与坠毁状态重置，确认没有延迟事件。浏览器检查按钮 Space 和驾驶上下文 R 都能清除相关状态／报告，并恢复驾驶焦点。
 
-5. **方向修复**：地面转向符号反转；飞行 Q/E 滚转符号反转；飞行 A/D 偏航符号未改。数值测试覆盖前进／倒车 Ackermann、直接／辅助各轴力矩符号与角速率收敛。
+5. **方向修复**：地面转向符号反转；飞行 Q/E 滚转符号反转；v0.1飞行 A/D 偏航基线统一为D负Y／A正Y。数值测试覆盖前进／倒车 Ackermann、直接／辅助各轴力矩符号与角速率收敛。
 6. **自定义按键**：11 项新增单元测试覆盖 12 个默认动作、分模式 W/S、共享升力、左右修饰键、版本化持久化、异常／损坏存储回退、非法键与动作、订阅快照、默认恢复和重复绑定。浏览器覆盖实际点击捕获改键、modal 防误输入、HUD 动态提示、I/K 分模式映射、T 重置、刷新后保留、Escape 行为、默认恢复，以及 390×844／844×390 的入口和关闭按钮可访问性。
 
 7. **LANDING角度级联**：新增数值测试验证不同航向下中立回正力矩、±30°定角收敛／松杆恢复、Yaw速率不变、0.2秒混合、进入退出滞回和GROUND／DIRECT退出。HUD显示LANDING ASSIST。
